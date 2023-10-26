@@ -71,7 +71,7 @@ public:
 };
 
 #ifdef SPIRV_CROSS_TINY
-#define SPIRV_CROSS_THROW(x) throw CompilerError()
+#define SPIRV_CROSS_THROW(x) throw CompilerError("")
 #else
 #define SPIRV_CROSS_THROW(x) throw CompilerError(x)
 #endif
