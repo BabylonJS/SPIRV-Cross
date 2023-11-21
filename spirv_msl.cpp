@@ -17924,3 +17924,403 @@ string CompilerMSL::additional_fixed_sample_mask_str() const
 #endif
 	return print_buffer;
 }
+// From GLSL
+
+void CompilerMSL::add_resource_name(uint32_t id)
+{
+	add_variable(resource_names, block_names, ir.meta[id].decoration.alias);
+}
+
+uint32_t CompilerMSL::to_array_size_literal(const SPIRType &type) const
+{
+	return to_array_size_literal(type, uint32_t(type.array.size() - 1));
+}
+
+uint32_t CompilerMSL::to_array_size_literal(const SPIRType &type, uint32_t index) const
+{
+	assert(type.array.size() == type.array_size_literal.size());
+
+	if (type.array_size_literal[index])
+	{
+		return type.array[index];
+	}
+	else
+	{
+		// Use the default spec constant value.
+		// This is the best we can do.
+		return evaluate_constant_u32(type.array[index]);
+	}
+}
+
+void CompilerMSL::begin_scope()
+{
+	statement("{");
+	indent++;
+}
+
+void CompilerMSL::end_scope()
+{
+	if (!indent)
+		SPIRV_CROSS_THROW("Popping empty indent stack.");
+	indent--;
+	statement("}");
+}
+
+void CompilerMSL::end_scope(const string &trailer)
+{
+	if (!indent)
+		SPIRV_CROSS_THROW("Popping empty indent stack.");
+	indent--;
+	statement("}", trailer);
+}
+
+void CompilerMSL::end_scope_decl()
+{
+	if (!indent)
+		SPIRV_CROSS_THROW("Popping empty indent stack.");
+	indent--;
+	statement("};");
+}
+
+void CompilerMSL::end_scope_decl(const string &decl)
+{
+	if (!indent)
+		SPIRV_CROSS_THROW("Popping empty indent stack.");
+	indent--;
+	statement("} ", decl, ";");
+}
+
+void CompilerMSL::add_local_variable_name(uint32_t id)
+{
+	add_variable(local_variable_names, block_names, ir.meta[id].decoration.alias);
+}
+
+void CompilerMSL::fixup_anonymous_struct_names(std::unordered_set<uint32_t> &visited, const SPIRType &type)
+{
+	if (visited.count(type.self))
+		return;
+	visited.insert(type.self);
+
+	for (uint32_t i = 0; i < uint32_t(type.member_types.size()); i++)
+	{
+		auto &mbr_type = get<SPIRType>(type.member_types[i]);
+
+		if (mbr_type.basetype == SPIRType::Struct)
+		{
+			// If there are multiple aliases, the output might be somewhat unpredictable,
+			// but the only real alternative in that case is to do nothing, which isn't any better.
+			// This check should be fine in practice.
+			if (get_name(mbr_type.self).empty() && !get_member_name(type.self, i).empty())
+			{
+				auto anon_name = join("anon_", get_member_name(type.self, i));
+				ParsedIR::sanitize_underscores(anon_name);
+				set_name(mbr_type.self, anon_name);
+			}
+
+			fixup_anonymous_struct_names(visited, mbr_type);
+		}
+	}
+}
+
+void CompilerMSL::fixup_anonymous_struct_names()
+{
+	// HLSL codegen can often end up emitting anonymous structs inside blocks, which
+	// breaks GL linking since all names must match ...
+	// Try to emit sensible code, so attempt to find such structs and emit anon_$member.
+
+	// Breaks exponential explosion with weird type trees.
+	std::unordered_set<uint32_t> visited;
+
+	ir.for_each_typed_id<SPIRType>([&](uint32_t, SPIRType &type) {
+		if (type.basetype == SPIRType::Struct &&
+		    (has_decoration(type.self, DecorationBlock) ||
+		     has_decoration(type.self, DecorationBufferBlock)))
+		{
+			fixup_anonymous_struct_names(visited, type);
+		}
+	});
+}
+
+void CompilerMSL::fixup_type_alias()
+{
+	// Due to how some backends work, the "master" type of type_alias must be a block-like type if it exists.
+	ir.for_each_typed_id<SPIRType>([&](uint32_t self, SPIRType &type) {
+		if (!type.type_alias)
+			return;
+
+		if (has_decoration(type.self, DecorationBlock) || has_decoration(type.self, DecorationBufferBlock))
+		{
+			// Top-level block types should never alias anything else.
+			type.type_alias = 0;
+		}
+		else if (type_is_block_like(type) && type.self == ID(self))
+		{
+			// A block-like type is any type which contains Offset decoration, but not top-level blocks,
+			// i.e. blocks which are placed inside buffers.
+			// Become the master.
+			ir.for_each_typed_id<SPIRType>([&](uint32_t other_id, SPIRType &other_type) {
+				if (other_id == self)
+					return;
+
+				if (other_type.type_alias == type.type_alias)
+					other_type.type_alias = self;
+			});
+
+			this->get<SPIRType>(type.type_alias).type_alias = self;
+			type.type_alias = 0;
+		}
+	});
+}
+
+void CompilerMSL::fixup_image_load_store_access()
+{
+	if (!options.enable_storage_image_qualifier_deduction)
+		return;
+
+	ir.for_each_typed_id<SPIRVariable>([&](uint32_t var, const SPIRVariable &) {
+		auto &vartype = expression_type(var);
+		if (vartype.basetype == SPIRType::Image && vartype.image.sampled == 2)
+		{
+			// Very old glslangValidator and HLSL compilers do not emit required qualifiers here.
+			// Solve this by making the image access as restricted as possible and loosen up if we need to.
+			// If any no-read/no-write flags are actually set, assume that the compiler knows what it's doing.
+
+			if (!has_decoration(var, DecorationNonWritable) && !has_decoration(var, DecorationNonReadable))
+			{
+				set_decoration(var, DecorationNonWritable);
+				set_decoration(var, DecorationNonReadable);
+			}
+		}
+	});
+}
+
+void CompilerMSL::reorder_type_alias()
+{
+	// Reorder declaration of types so that the master of the type alias is always emitted first.
+	// We need this in case a type B depends on type A (A must come before in the vector), but A is an alias of a type Abuffer, which
+	// means declaration of A doesn't happen (yet), and order would be B, ABuffer and not ABuffer, B. Fix this up here.
+	auto loop_lock = ir.create_loop_hard_lock();
+
+	auto &type_ids = ir.ids_for_type[TypeType];
+	for (auto alias_itr = begin(type_ids); alias_itr != end(type_ids); ++alias_itr)
+	{
+		auto &type = get<SPIRType>(*alias_itr);
+		if (type.type_alias != TypeID(0) &&
+		    !has_extended_decoration(type.type_alias, SPIRVCrossDecorationBufferBlockRepacked))
+		{
+			// We will skip declaring this type, so make sure the type_alias type comes before.
+			auto master_itr = find(begin(type_ids), end(type_ids), ID(type.type_alias));
+			assert(master_itr != end(type_ids));
+
+			if (alias_itr < master_itr)
+			{
+				// Must also swap the type order for the constant-type joined array.
+				auto &joined_types = ir.ids_for_constant_undef_or_type;
+				auto alt_alias_itr = find(begin(joined_types), end(joined_types), *alias_itr);
+				auto alt_master_itr = find(begin(joined_types), end(joined_types), *master_itr);
+				assert(alt_alias_itr != end(joined_types));
+				assert(alt_master_itr != end(joined_types));
+
+				swap(*alias_itr, *master_itr);
+				swap(*alt_alias_itr, *alt_master_itr);
+			}
+		}
+	}
+}
+
+void CompilerMSL::reset(uint32_t iteration_count)
+{
+	// Sanity check the iteration count to be robust against a certain class of bugs where
+	// we keep forcing recompilations without making clear forward progress.
+	// In buggy situations we will loop forever, or loop for an unbounded number of iterations.
+	// Certain types of recompilations are considered to make forward progress,
+	// but in almost all situations, we'll never see more than 3 iterations.
+	// It is highly context-sensitive when we need to force recompilation,
+	// and it is not practical with the current architecture
+	// to resolve everything up front.
+	if (iteration_count >= options.force_recompile_max_debug_iterations && !is_force_recompile_forward_progress)
+		SPIRV_CROSS_THROW("Maximum compilation loops detected and no forward progress was made. Must be a SPIRV-Cross bug!");
+
+	// We do some speculative optimizations which should pretty much always work out,
+	// but just in case the SPIR-V is rather weird, recompile until it's happy.
+	// This typically only means one extra pass.
+	clear_force_recompile();
+
+	// Clear invalid expression tracking.
+	invalid_expressions.clear();
+	composite_insert_overwritten.clear();
+	current_function = nullptr;
+
+	// Clear temporary usage tracking.
+	expression_usage_counts.clear();
+	forwarded_temporaries.clear();
+	suppressed_usage_tracking.clear();
+
+	// Ensure that we declare phi-variable copies even if the original declaration isn't deferred
+	flushed_phi_variables.clear();
+
+	current_emitting_switch_stack.clear();
+
+	reset_name_caches();
+
+	ir.for_each_typed_id<SPIRFunction>([&](uint32_t, SPIRFunction &func) {
+		func.active = false;
+		func.flush_undeclared = true;
+	});
+
+	ir.for_each_typed_id<SPIRVariable>([&](uint32_t, SPIRVariable &var) { var.dependees.clear(); });
+
+	ir.reset_all_of_type<SPIRExpression>();
+	ir.reset_all_of_type<SPIRAccessChain>();
+
+	statement_count = 0;
+	indent = 0;
+	current_loop_level = 0;
+}
+
+void CompilerMSL::emit_function(SPIRFunction &func, const Bitset &return_flags)
+{
+	// Avoid potential cycles.
+	if (func.active)
+		return;
+	func.active = true;
+
+	// If we depend on a function, emit that function before we emit our own function.
+	for (auto block : func.blocks)
+	{
+		auto &b = get<SPIRBlock>(block);
+		for (auto &i : b.ops)
+		{
+			auto ops = stream(i);
+			auto op = static_cast<Op>(i.op);
+
+			if (op == OpFunctionCall)
+			{
+				// Recursively emit functions which are called.
+				uint32_t id = ops[2];
+				emit_function(get<SPIRFunction>(id), ir.meta[ops[1]].decoration.decoration_flags);
+			}
+		}
+	}
+
+	if (func.entry_line.file_id != 0)
+		emit_line_directive(func.entry_line.file_id, func.entry_line.line_literal);
+	emit_function_prototype(func, return_flags);
+	begin_scope();
+
+	if (func.self == ir.default_entry_point)
+		emit_entry_point_declarations();
+
+	current_function = &func;
+	auto &entry_block = get<SPIRBlock>(func.entry_block);
+
+	sort(begin(func.constant_arrays_needed_on_stack), end(func.constant_arrays_needed_on_stack));
+	for (auto &array : func.constant_arrays_needed_on_stack)
+	{
+		auto &c = get<SPIRConstant>(array);
+		auto &type = get<SPIRType>(c.constant_type);
+		statement(variable_decl(type, join("_", array, "_array_copy")), " = ", constant_expression(c), ";");
+	}
+
+	for (auto &v : func.local_variables)
+	{
+		auto &var = get<SPIRVariable>(v);
+		var.deferred_declaration = false;
+
+		if (variable_decl_is_remapped_storage(var, StorageClassWorkgroup))
+		{
+			// Special variable type which cannot have initializer,
+			// need to be declared as standalone variables.
+			// Comes from MSL which can push global variables as local variables in main function.
+			add_local_variable_name(var.self);
+			statement(variable_decl(var), ";");
+			var.deferred_declaration = false;
+		}
+		else if (var.storage == StorageClassPrivate)
+		{
+			// These variables will not have had their CFG usage analyzed, so move it to the entry block.
+			// Comes from MSL which can push global variables as local variables in main function.
+			// We could just declare them right now, but we would miss out on an important initialization case which is
+			// LUT declaration in MSL.
+			// If we don't declare the variable when it is assigned we're forced to go through a helper function
+			// which copies elements one by one.
+			add_local_variable_name(var.self);
+
+			if (var.initializer)
+			{
+				statement(variable_decl(var), ";");
+				var.deferred_declaration = false;
+			}
+			else
+			{
+				auto &dominated = entry_block.dominated_variables;
+				if (find(begin(dominated), end(dominated), var.self) == end(dominated))
+					entry_block.dominated_variables.push_back(var.self);
+				var.deferred_declaration = true;
+			}
+		}
+		else if (var.storage == StorageClassFunction && var.remapped_variable && var.static_expression)
+		{
+			// No need to declare this variable, it has a static expression.
+			var.deferred_declaration = false;
+		}
+		else if (expression_is_lvalue(v))
+		{
+			add_local_variable_name(var.self);
+
+			// Loop variables should never be declared early, they are explicitly emitted in a loop.
+			if (var.initializer && !var.loop_variable)
+				statement(variable_decl_function_local(var), ";");
+			else
+			{
+				// Don't declare variable until first use to declutter the GLSL output quite a lot.
+				// If we don't touch the variable before first branch,
+				// declare it then since we need variable declaration to be in top scope.
+				var.deferred_declaration = true;
+			}
+		}
+		else
+		{
+			// HACK: SPIR-V in older glslang output likes to use samplers and images as local variables, but GLSL does not allow this.
+			// For these types (non-lvalue), we enforce forwarding through a shadowed variable.
+			// This means that when we OpStore to these variables, we just write in the expression ID directly.
+			// This breaks any kind of branching, since the variable must be statically assigned.
+			// Branching on samplers and images would be pretty much impossible to fake in GLSL.
+			var.statically_assigned = true;
+		}
+
+		var.loop_variable_enable = false;
+
+		// Loop variables are never declared outside their for-loop, so block any implicit declaration.
+		if (var.loop_variable)
+		{
+			var.deferred_declaration = false;
+			// Need to reset the static expression so we can fallback to initializer if need be.
+			var.static_expression = 0;
+		}
+	}
+
+	// Enforce declaration order for regression testing purposes.
+	for (auto &block_id : func.blocks)
+	{
+		auto &block = get<SPIRBlock>(block_id);
+		sort(begin(block.dominated_variables), end(block.dominated_variables));
+	}
+
+	for (auto &line : current_function->fixup_hooks_in)
+		line();
+
+	emit_block_chain(entry_block);
+
+	end_scope();
+	processing_entry_point = false;
+	statement("");
+
+	// Make sure deferred declaration state for local variables is cleared when we are done with function.
+	// We risk declaring Private/Workgroup variables in places we are not supposed to otherwise.
+	for (auto &v : func.local_variables)
+	{
+		auto &var = get<SPIRVariable>(v);
+		var.deferred_declaration = false;
+	}
+}

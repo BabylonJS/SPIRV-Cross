@@ -23,6 +23,7 @@
 
 #ifndef SPIRV_CROSS_MSL_HPP
 #define SPIRV_CROSS_MSL_HPP
+#include "GLSL.std.450.h"
 #include "spirv_cross.hpp"
 
 #include <map>
@@ -1526,14 +1527,20 @@ protected:
 	std::unordered_map<uint32_t, uint32_t> extra_sub_expressions;
 	std::unordered_set<std::string> local_variable_names;
 	std::unordered_set<std::string> resource_names;
-	bool processing_entry_point = false;
+	std::unordered_set<uint32_t> composite_insert_overwritten;
+	std::unordered_map<uint32_t, uint32_t> expression_usage_counts;
+	std::unordered_set<uint32_t> flushed_phi_variables;
+	SmallVector<SPIRBlock *> current_emitting_switch_stack;
 
-	void add_resource_name(uint32_t id);
+	std::unordered_set<std::string> block_names; // A union of all block_*_names.
+	bool processing_entry_point = false;
 	char current_locale_radix_character = '.';
 
 	uint32_t statement_count = 0;
 	StringStream<> buffer;
 	SPIRBlock *current_emitting_block = nullptr;
+	SmallVector<std::string> *redirect_statement = nullptr;
+	uint32_t indent = 0;
 	template <typename T>
 	inline void statement_inner(T &&t)
 	{
@@ -1582,7 +1589,7 @@ protected:
 		statement(std::forward<Ts>(ts)...);
 		indent = old_indent;
 	}
-
+	void add_resource_name(uint32_t id);
 	uint32_t to_array_size_literal(const SPIRType &type) const;
 	uint32_t to_array_size_literal(const SPIRType &type, uint32_t index) const;
 	void begin_scope();
@@ -1674,7 +1681,12 @@ protected:
 	std::string to_array_size(const SPIRType &type, uint32_t index);
 	std::string to_rerolled_array_expression(const SPIRType &parent_type, const std::string &expr, const SPIRType &type);
 
-
+	void add_variable(std::unordered_set<std::string> &variables_primary,
+	                  const std::unordered_set<std::string> &variables_secondary, std::string &name);
+	void reset_name_caches();
+	void emit_line_directive(uint32_t file_id, uint32_t line_literal);
+	std::string variable_decl_function_local(SPIRVariable &variable);
+	void emit_block_chain(SPIRBlock &block);
 	//Override methods
 	void GLSL_emit_store_statement(uint32_t lhs_expression, uint32_t rhs_expression);
 	void GLSL_emit_instruction(const Instruction &instr);
