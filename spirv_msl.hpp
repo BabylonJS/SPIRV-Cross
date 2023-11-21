@@ -23,8 +23,8 @@
 
 #ifndef SPIRV_CROSS_MSL_HPP
 #define SPIRV_CROSS_MSL_HPP
+#include "spirv_cross.hpp"
 
-#include "spirv_glsl.hpp"
 #include <map>
 #include <set>
 #include <stddef.h>
@@ -291,7 +291,7 @@ static const uint32_t kMaxArgumentBuffers = 8;
 static const uint32_t kArrayCopyMultidimMax = 6;
 
 // Decompiles SPIR-V to Metal Shading Language
-class CompilerMSL : public CompilerGLSL
+class CompilerMSL : public Compiler
 {
 public:
 	// Options for compiling to Metal Shading Language
@@ -534,6 +534,36 @@ public:
 		{
 			return (major * 10000) + (minor * 100) + patch;
 		}
+	};
+
+	struct TextureFunctionBaseArguments
+	{
+		// GCC 4.8 workarounds, it doesn't understand '{}' constructor here, use explicit default constructor.
+		TextureFunctionBaseArguments() = default;
+		VariableID img = 0;
+		const SPIRType *imgtype = nullptr;
+		bool is_fetch = false, is_gather = false, is_proj = false;
+	};
+
+	struct TextureFunctionNameArguments
+	{
+		// GCC 4.8 workarounds, it doesn't understand '{}' constructor here, use explicit default constructor.
+		TextureFunctionNameArguments() = default;
+		TextureFunctionBaseArguments base;
+		bool has_array_offsets = false, has_offset = false, has_grad = false;
+		bool has_dref = false, is_sparse_feedback = false, has_min_lod = false;
+		uint32_t lod = 0;
+	};
+	
+	struct TextureFunctionArguments
+	{
+		// GCC 4.8 workarounds, it doesn't understand '{}' constructor here, use explicit default constructor.
+		TextureFunctionArguments() = default;
+		TextureFunctionBaseArguments base;
+		uint32_t coord = 0, coord_components = 0, dref = 0;
+		uint32_t grad_x = 0, grad_y = 0, lod = 0, offset = 0;
+		uint32_t bias = 0, component = 0, sample = 0, sparse_texel = 0, min_lod = 0;
+		bool nonuniform_expression = false;
 	};
 
 	const Options &get_msl_options() const
@@ -812,65 +842,65 @@ protected:
 
 	// If the underlying resource has been used for comparison then duplicate loads of that resource must be too
 	// Use Metal's native frame-buffer fetch API for subpass inputs.
-	void emit_texture_op(const Instruction &i, bool sparse) override;
+	void emit_texture_op(const Instruction &i, bool sparse);
 	void emit_binary_ptr_op(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1, const char *op);
 	std::string to_ptr_expression(uint32_t id, bool register_expression_read = true);
 	void emit_binary_unord_op(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1, const char *op);
-	void emit_instruction(const Instruction &instr) override;
+	void emit_instruction(const Instruction &instr);
 	void emit_glsl_op(uint32_t result_type, uint32_t result_id, uint32_t op, const uint32_t *args,
-	                  uint32_t count) override;
+	                  uint32_t count);
 	void emit_spv_amd_shader_trinary_minmax_op(uint32_t result_type, uint32_t result_id, uint32_t op,
-	                                           const uint32_t *args, uint32_t count) override;
-	void emit_header() override;
-	void emit_function_prototype(SPIRFunction &func, const Bitset &return_flags) override;
-	void emit_sampled_image_op(uint32_t result_type, uint32_t result_id, uint32_t image_id, uint32_t samp_id) override;
-	void emit_subgroup_op(const Instruction &i) override;
+	                                           const uint32_t *args, uint32_t count);
+	void emit_header();
+	void emit_function_prototype(SPIRFunction &func, const Bitset &return_flags);
+	void emit_sampled_image_op(uint32_t result_type, uint32_t result_id, uint32_t image_id, uint32_t samp_id);
+	void emit_subgroup_op(const Instruction &i);
 	std::string to_texture_op(const Instruction &i, bool sparse, bool *forward,
-	                          SmallVector<uint32_t> &inherited_expressions) override;
-	void emit_fixup() override;
+	                          SmallVector<uint32_t> &inherited_expressions);
+	void emit_fixup();
 	std::string to_struct_member(const SPIRType &type, uint32_t member_type_id, uint32_t index,
 	                             const std::string &qualifier = "");
 	void emit_struct_member(const SPIRType &type, uint32_t member_type_id, uint32_t index,
-	                        const std::string &qualifier = "", uint32_t base_offset = 0) override;
-	void emit_struct_padding_target(const SPIRType &type) override;
+	                        const std::string &qualifier = "", uint32_t base_offset = 0);
+	void emit_struct_padding_target(const SPIRType &type);
 	std::string type_to_glsl(const SPIRType &type, uint32_t id, bool member);
-	std::string type_to_glsl(const SPIRType &type, uint32_t id = 0) override;
-	void emit_block_hints(const SPIRBlock &block) override;
+	std::string type_to_glsl(const SPIRType &type, uint32_t id = 0);
+	void emit_block_hints(const SPIRBlock &block);
 
 	// Allow Metal to use the array<T> template to make arrays a value type
-	std::string type_to_array_glsl(const SPIRType &type) override;
-	std::string constant_op_expression(const SPIRConstantOp &cop) override;
+	std::string type_to_array_glsl(const SPIRType &type);
+	std::string constant_op_expression(const SPIRConstantOp &cop);
 
 	// Threadgroup arrays can't have a wrapper type
-	std::string variable_decl(const SPIRVariable &variable) override;
+	std::string variable_decl(const SPIRVariable &variable);
 
-	bool variable_decl_is_remapped_storage(const SPIRVariable &variable, spv::StorageClass storage) const override;
+	bool variable_decl_is_remapped_storage(const SPIRVariable &variable, spv::StorageClass storage) const;
 
 	// GCC workaround of lambdas calling protected functions (for older GCC versions)
-	std::string variable_decl(const SPIRType &type, const std::string &name, uint32_t id = 0) override;
+	std::string variable_decl(const SPIRType &type, const std::string &name, uint32_t id = 0);
 
-	std::string image_type_glsl(const SPIRType &type, uint32_t id = 0) override;
+	std::string image_type_glsl(const SPIRType &type, uint32_t id = 0);
 	std::string sampler_type(const SPIRType &type, uint32_t id);
-	std::string builtin_to_glsl(spv::BuiltIn builtin, spv::StorageClass storage) override;
-	std::string to_func_call_arg(const SPIRFunction::Parameter &arg, uint32_t id) override;
+	std::string builtin_to_glsl(spv::BuiltIn builtin, spv::StorageClass storage);
+	std::string to_func_call_arg(const SPIRFunction::Parameter &arg, uint32_t id);
 	std::string to_name(uint32_t id, bool allow_alias = true) const override;
-	std::string to_function_name(const TextureFunctionNameArguments &args) override;
-	std::string to_function_args(const TextureFunctionArguments &args, bool *p_forward) override;
-	std::string to_initializer_expression(const SPIRVariable &var) override;
-	std::string to_zero_initialized_expression(uint32_t type_id) override;
+	std::string to_function_name(const TextureFunctionNameArguments &args);
+	std::string to_function_args(const TextureFunctionArguments &args, bool *p_forward);
+	std::string to_initializer_expression(const SPIRVariable &var);
+	std::string to_zero_initialized_expression(uint32_t type_id);
 
 	std::string unpack_expression_type(std::string expr_str, const SPIRType &type, uint32_t physical_type_id,
-	                                   bool is_packed, bool row_major) override;
+	                                   bool is_packed, bool row_major);
 
 	// Returns true for BuiltInSampleMask because gl_SampleMask[] is an array in SPIR-V, but [[sample_mask]] is a scalar in Metal.
-	bool builtin_translates_to_nonarray(spv::BuiltIn builtin) const override;
+	bool builtin_translates_to_nonarray(spv::BuiltIn builtin) const;
 
-	std::string bitcast_glsl_op(const SPIRType &result_type, const SPIRType &argument_type) override;
-	bool emit_complex_bitcast(uint32_t result_id, uint32_t id, uint32_t op0) override;
-	bool skip_argument(uint32_t id) const override;
-	std::string to_member_reference(uint32_t base, const SPIRType &type, uint32_t index, bool ptr_chain_is_resolved) override;
-	std::string to_qualifiers_glsl(uint32_t id) override;
-	void replace_illegal_names() override;
+	std::string bitcast_glsl_op(const SPIRType &result_type, const SPIRType &argument_type);
+	bool emit_complex_bitcast(uint32_t result_id, uint32_t id, uint32_t op0);
+	bool skip_argument(uint32_t id) const;
+	std::string to_member_reference(uint32_t base, const SPIRType &type, uint32_t index, bool ptr_chain_is_resolved);
+	std::string to_qualifiers_glsl(uint32_t id);
+	void replace_illegal_names();
 	void declare_constant_arrays();
 
 	void replace_illegal_entry_point_names();
@@ -883,10 +913,10 @@ protected:
 	void declare_complex_constant_arrays();
 
 	bool is_patch_block(const SPIRType &type);
-	bool is_non_native_row_major_matrix(uint32_t id) override;
-	bool member_is_non_native_row_major_matrix(const SPIRType &type, uint32_t index) override;
+	bool is_non_native_row_major_matrix(uint32_t id);
+	bool member_is_non_native_row_major_matrix(const SPIRType &type, uint32_t index);
 	std::string convert_row_major_matrix(std::string exp_str, const SPIRType &exp_type, uint32_t physical_type_id,
-	                                     bool is_packed, bool relaxed) override;
+	                                     bool is_packed, bool relaxed);
 
 	bool is_tesc_shader() const;
 	bool is_tese_shader() const;
@@ -1046,10 +1076,10 @@ protected:
 	void add_typedef_line(const std::string &line);
 	void emit_barrier(uint32_t id_exe_scope, uint32_t id_mem_scope, uint32_t id_mem_sem);
 	bool emit_array_copy(const char *expr, uint32_t lhs_id, uint32_t rhs_id,
-	                     spv::StorageClass lhs_storage, spv::StorageClass rhs_storage) override;
+	                     spv::StorageClass lhs_storage, spv::StorageClass rhs_storage);
 	void build_implicit_builtins();
 	uint32_t build_constant_uint_array_pointer();
-	void emit_entry_point_declarations() override;
+	void emit_entry_point_declarations();
 	bool uses_explicit_early_fragment_test();
 
 	uint32_t builtin_frag_coord_id = 0;
@@ -1082,17 +1112,17 @@ protected:
 	bool does_shader_write_sample_mask = false;
 	bool frag_shader_needs_discard_checks = false;
 
-	void cast_to_variable_store(uint32_t target_id, std::string &expr, const SPIRType &expr_type) override;
-	void cast_from_variable_load(uint32_t source_id, std::string &expr, const SPIRType &expr_type) override;
-	void emit_store_statement(uint32_t lhs_expression, uint32_t rhs_expression) override;
+	void cast_to_variable_store(uint32_t target_id, std::string &expr, const SPIRType &expr_type);
+	void cast_from_variable_load(uint32_t source_id, std::string &expr, const SPIRType &expr_type);
+	void emit_store_statement(uint32_t lhs_expression, uint32_t rhs_expression);
 
 	void analyze_sampled_image_usage();
 
-	bool access_chain_needs_stage_io_builtin_translation(uint32_t base) override;
+	bool access_chain_needs_stage_io_builtin_translation(uint32_t base);
 	void prepare_access_chain_for_scalar_access(std::string &expr, const SPIRType &type, spv::StorageClass storage,
-	                                            bool &is_packed) override;
+	                                            bool &is_packed);
 	void fix_up_interpolant_access_chain(const uint32_t *ops, uint32_t length);
-	void check_physical_type_cast(std::string &expr, const SPIRType *type, uint32_t physical_type) override;
+	void check_physical_type_cast(std::string &expr, const SPIRType *type, uint32_t physical_type);
 
 	bool emit_tessellation_access_chain(const uint32_t *ops, uint32_t length);
 	bool emit_tessellation_io_load(uint32_t result_type, uint32_t id, uint32_t ptr);
@@ -1305,6 +1335,368 @@ protected:
 		Meta &meta;
 		SortAspect sort_aspect;
 	};
+
+	// FROM GLSL
+	struct GLSLOptions
+	{
+		// The shading language version. Corresponds to #version $VALUE.
+		uint32_t version = 450;
+
+		// Emit the OpenGL ES shading language instead of desktop OpenGL.
+		bool es = false;
+
+		// Debug option to always emit temporary variables for all expressions.
+		bool force_temporary = false;
+		// Debug option, can be increased in an attempt to workaround SPIRV-Cross bugs temporarily.
+		// If this limit has to be increased, it points to an implementation bug.
+		// In certain scenarios, the maximum number of debug iterations may increase beyond this limit
+		// as long as we can prove we're making certain kinds of forward progress.
+		uint32_t force_recompile_max_debug_iterations = 3;
+
+		// If true, Vulkan GLSL features are used instead of GL-compatible features.
+		// Mostly useful for debugging SPIR-V files.
+		bool vulkan_semantics = false;
+
+		// If true, gl_PerVertex is explicitly redeclared in vertex, geometry and tessellation shaders.
+		// The members of gl_PerVertex is determined by which built-ins are declared by the shader.
+		// This option is ignored in ES versions, as redeclaration in ES is not required, and it depends on a different extension
+		// (EXT_shader_io_blocks) which makes things a bit more fuzzy.
+		bool separate_shader_objects = false;
+
+		// Flattens multidimensional arrays, e.g. float foo[a][b][c] into single-dimensional arrays,
+		// e.g. float foo[a * b * c].
+		// This function does not change the actual SPIRType of any object.
+		// Only the generated code, including declarations of interface variables are changed to be single array dimension.
+		bool flatten_multidimensional_arrays = false;
+
+		// For older desktop GLSL targets than version 420, the
+		// GL_ARB_shading_language_420pack extensions is used to be able to support
+		// layout(binding) on UBOs and samplers.
+		// If disabled on older targets, binding decorations will be stripped.
+		bool enable_420pack_extension = true;
+
+		// In non-Vulkan GLSL, emit push constant blocks as UBOs rather than plain uniforms.
+		bool emit_push_constant_as_uniform_buffer = false;
+
+		// Always emit uniform blocks as plain uniforms, regardless of the GLSL version, even when UBOs are supported.
+		// Does not apply to shader storage or push constant blocks.
+		bool emit_uniform_buffer_as_plain_uniforms = false;
+
+		// Emit OpLine directives if present in the module.
+		// May not correspond exactly to original source, but should be a good approximation.
+		bool emit_line_directives = false;
+
+		// In cases where readonly/writeonly decoration are not used at all,
+		// we try to deduce which qualifier(s) we should actually used, since actually emitting
+		// read-write decoration is very rare, and older glslang/HLSL compilers tend to just emit readwrite as a matter of fact.
+		// The default (true) is to enable automatic deduction for these cases, but if you trust the decorations set
+		// by the SPIR-V, it's recommended to set this to false.
+		bool enable_storage_image_qualifier_deduction = true;
+
+		// On some targets (WebGPU), uninitialized variables are banned.
+		// If this is enabled, all variables (temporaries, Private, Function)
+		// which would otherwise be uninitialized will now be initialized to 0 instead.
+		bool force_zero_initialized_variables = false;
+
+		// In GLSL, force use of I/O block flattening, similar to
+		// what happens on legacy GLSL targets for blocks and structs.
+		bool force_flattened_io_blocks = false;
+
+		// For opcodes where we have to perform explicit additional nan checks, very ugly code is generated.
+		// If we opt-in, ignore these requirements.
+		// In opcodes like NClamp/NMin/NMax and FP compare, ignore NaN behavior.
+		// Use FClamp/FMin/FMax semantics for clamps and lets implementation choose ordered or unordered
+		// compares.
+		bool relax_nan_checks = false;
+
+		// Loading row-major matrices from UBOs on older AMD Windows OpenGL drivers is problematic.
+		// To load these types correctly, we must generate a wrapper. them in a dummy function which only purpose is to
+		// ensure row_major decoration is actually respected.
+		// This workaround may cause significant performance degeneration on some Android devices.
+		bool enable_row_major_load_workaround = true;
+
+		// If non-zero, controls layout(num_views = N) in; in GL_OVR_multiview2.
+		uint32_t ovr_multiview_view_count = 0;
+
+		enum Precision
+		{
+			DontCare,
+			Lowp,
+			Mediump,
+			Highp
+		};
+
+		struct VertexOptions
+		{
+			// "Vertex-like shader" here is any shader stage that can write BuiltInPosition.
+
+			// GLSL: In vertex-like shaders, rewrite [0, w] depth (Vulkan/D3D style) to [-w, w] depth (GL style).
+			// MSL: In vertex-like shaders, rewrite [-w, w] depth (GL style) to [0, w] depth.
+			// HLSL: In vertex-like shaders, rewrite [-w, w] depth (GL style) to [0, w] depth.
+			bool fixup_clipspace = false;
+
+			// In vertex-like shaders, inverts gl_Position.y or equivalent.
+			bool flip_vert_y = false;
+
+			// GLSL only, for HLSL version of this option, see CompilerHLSL.
+			// If true, the backend will assume that InstanceIndex will need to apply
+			// a base instance offset. Set to false if you know you will never use base instance
+			// functionality as it might remove some internal uniforms.
+			bool support_nonzero_base_instance = true;
+		} vertex;
+
+		struct FragmentOptions
+		{
+			// Add precision mediump float in ES targets when emitting GLES source.
+			// Add precision highp int in ES targets when emitting GLES source.
+			Precision default_float_precision = Mediump;
+			Precision default_int_precision = Highp;
+		} fragment;
+	};
+
+	GLSLOptions options;
+
+	struct BackendVariations
+	{
+		std::string discard_literal = "discard";
+		std::string demote_literal = "demote";
+		std::string null_pointer_literal = "";
+		bool float_literal_suffix = false;
+		bool double_literal_suffix = true;
+		bool uint32_t_literal_suffix = true;
+		bool long_long_literal_suffix = false;
+		const char *basic_int_type = "int";
+		const char *basic_uint_type = "uint";
+		const char *basic_int8_type = "int8_t";
+		const char *basic_uint8_type = "uint8_t";
+		const char *basic_int16_type = "int16_t";
+		const char *basic_uint16_type = "uint16_t";
+		const char *int16_t_literal_suffix = "s";
+		const char *uint16_t_literal_suffix = "us";
+		const char *nonuniform_qualifier = "nonuniformEXT";
+		const char *boolean_mix_function = "mix";
+		SPIRType::BaseType boolean_in_struct_remapped_type = SPIRType::Boolean;
+		bool swizzle_is_function = false;
+		bool shared_is_implied = false;
+		bool unsized_array_supported = true;
+		bool explicit_struct_type = false;
+		bool use_initializer_list = false;
+		bool use_typed_initializer_list = false;
+		bool can_declare_struct_inline = true;
+		bool can_declare_arrays_inline = true;
+		bool native_row_major_matrix = true;
+		bool use_constructor_splatting = true;
+		bool allow_precision_qualifiers = false;
+		bool can_swizzle_scalar = false;
+		bool force_gl_in_out_block = false;
+		bool force_merged_mesh_block = false;
+		bool can_return_array = true;
+		bool allow_truncated_access_chain = false;
+		bool supports_extensions = false;
+		bool supports_empty_struct = false;
+		bool array_is_value_type = true;
+		bool array_is_value_type_in_buffer_blocks = true;
+		bool comparison_image_samples_scalar = false;
+		bool native_pointers = false;
+		bool support_small_type_sampling_result = false;
+		bool support_case_fallthrough = true;
+		bool use_array_constructor = false;
+		bool needs_row_major_load_workaround = false;
+		bool support_pointer_to_pointer = false;
+		bool support_precise_qualifier = false;
+		bool support_64bit_switch = false;
+		bool workgroup_size_is_hidden = false;
+		bool requires_relaxed_precision_analysis = false;
+		bool implicit_c_integer_promotion_rules = false;
+	} backend;
+
+	enum AccessChainFlagBits
+	{
+		ACCESS_CHAIN_INDEX_IS_LITERAL_BIT = 1 << 0,
+		ACCESS_CHAIN_CHAIN_ONLY_BIT = 1 << 1,
+		ACCESS_CHAIN_PTR_CHAIN_BIT = 1 << 2,
+		ACCESS_CHAIN_SKIP_REGISTER_EXPRESSION_READ_BIT = 1 << 3,
+		ACCESS_CHAIN_LITERAL_MSB_FORCE_ID = 1 << 4,
+		ACCESS_CHAIN_FLATTEN_ALL_MEMBERS_BIT = 1 << 5,
+		ACCESS_CHAIN_FORCE_COMPOSITE_BIT = 1 << 6
+	};
+	typedef uint32_t AccessChainFlags;
+
+	SmallVector<std::string> header_lines;
+	std::unordered_map<uint32_t, uint32_t> extra_sub_expressions;
+	std::unordered_set<std::string> local_variable_names;
+	std::unordered_set<std::string> resource_names;
+	bool processing_entry_point = false;
+
+	void add_resource_name(uint32_t id);
+	char current_locale_radix_character = '.';
+
+	uint32_t statement_count = 0;
+	StringStream<> buffer;
+	SPIRBlock *current_emitting_block = nullptr;
+	template <typename T>
+	inline void statement_inner(T &&t)
+	{
+		buffer << std::forward<T>(t);
+		statement_count++;
+	}
+
+	template <typename T, typename... Ts>
+	inline void statement_inner(T &&t, Ts &&... ts)
+	{
+		buffer << std::forward<T>(t);
+		statement_count++;
+		statement_inner(std::forward<Ts>(ts)...);
+	}
+
+	template <typename... Ts>
+	inline void statement(Ts &&... ts)
+	{
+		if (is_forcing_recompilation())
+		{
+			// Do not bother emitting code while force_recompile is active.
+			// We will compile again.
+			statement_count++;
+			return;
+		}
+
+		if (redirect_statement)
+		{
+			redirect_statement->push_back(join(std::forward<Ts>(ts)...));
+			statement_count++;
+		}
+		else
+		{
+			for (uint32_t i = 0; i < indent; i++)
+				buffer << "    ";
+			statement_inner(std::forward<Ts>(ts)...);
+			buffer << '\n';
+		}
+	}
+
+	template <typename... Ts>
+	inline void statement_no_indent(Ts &&... ts)
+	{
+		auto old_indent = indent;
+		indent = 0;
+		statement(std::forward<Ts>(ts)...);
+		indent = old_indent;
+	}
+
+	uint32_t to_array_size_literal(const SPIRType &type) const;
+	uint32_t to_array_size_literal(const SPIRType &type, uint32_t index) const;
+	void begin_scope();
+	void end_scope();
+	void end_scope(const std::string &trailer);
+	void end_scope_decl();
+	void end_scope_decl(const std::string &decl);
+	void add_local_variable_name(uint32_t id);
+	void fixup_anonymous_struct_names();
+	void fixup_anonymous_struct_names(std::unordered_set<uint32_t> &visited, const SPIRType &type);
+	void fixup_type_alias();
+	void fixup_image_load_store_access();
+	void reorder_type_alias();
+	void reset(uint32_t iteration_count);
+	void emit_function(SPIRFunction &func, const Bitset &return_flags);
+	void add_header_line(const std::string &str);
+	bool variable_is_lut(const SPIRVariable &var) const;
+	bool is_stage_output_variable_masked(const SPIRVariable &var) const;
+	bool is_stage_output_block_member_masked(const SPIRVariable &var, uint32_t index, bool strip_array) const;
+	uint32_t type_to_location_count(const SPIRType &type) const;
+	static const char *vector_swizzle(int vecsize, int index);
+	std::string to_expression(uint32_t id, bool register_expression_read = true);
+	std::string to_member_name(const SPIRType &type, uint32_t index);
+	std::string remap_swizzle(const SPIRType &result_type, uint32_t input_components, const std::string &expr);
+	uint32_t get_accumulated_member_location(const SPIRVariable &var, uint32_t mbr_idx, bool strip_array) const;
+	std::string constant_expression(const SPIRConstant &c,
+	                                bool inside_block_like_struct_scope = false,
+	                                bool inside_struct_scope = false);
+	void mask_stage_output_by_builtin(spv::BuiltIn builtin);
+	std::string to_unpacked_row_major_matrix_expression(uint32_t id);
+	std::string to_unpacked_expression(uint32_t id, bool register_expression_read = true);
+	std::string to_dereferenced_expression(uint32_t id, bool register_expression_read = true);
+	std::string to_extract_component_expression(uint32_t id, uint32_t index);
+	std::string to_enclosed_expression(uint32_t id, bool register_expression_read = true);
+	std::string type_to_glsl_constructor(const SPIRType &type);
+	std::string to_enclosed_unpacked_expression(uint32_t id, bool register_expression_read = true);
+	std::string to_pointer_expression(uint32_t id, bool register_expression_read = true);
+	std::string enclose_expression(const std::string &expr);
+	bool optimize_read_modify_write(const SPIRType &type, const std::string &lhs, const std::string &rhs);
+	std::string bitcast_expression(SPIRType::BaseType target_type, uint32_t arg);
+	std::string bitcast_expression(const SPIRType &target_type, SPIRType::BaseType expr_type, const std::string &expr);
+	std::string constant_value_macro_name(uint32_t id);
+	void emit_struct(SPIRType &type);
+	bool should_forward(uint32_t id) const;
+	SPIRExpression &emit_op(uint32_t result_type, uint32_t result_id, const std::string &rhs, bool forward_rhs,
+	                        bool suppress_usage_tracking = false);
+
+	bool should_dereference(uint32_t id);
+	std::string address_of_expression(const std::string &expr);
+	std::string access_chain_internal(uint32_t base, const uint32_t *indices, uint32_t count, AccessChainFlags flags,
+	                                  AccessChainMeta *meta);
+	std::string access_chain(uint32_t base, const uint32_t *indices, uint32_t count, const SPIRType &target_type,
+	                         AccessChainMeta *meta = nullptr, bool ptr_chain = false);
+
+	spv::Op get_remapped_spirv_op(spv::Op op) const;
+	uint32_t get_integer_width_for_instruction(const Instruction &instr) const;
+	void emit_binary_op_cast(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1, const char *op,
+	                         SPIRType::BaseType input_type, bool skip_cast_if_equal_type, bool implicit_integer_promotion);
+	void emit_binary_op(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1, const char *op);
+	void emit_unary_func_op(uint32_t result_type, uint32_t result_id, uint32_t op0, const char *op);
+	void register_control_dependent_expression(uint32_t expr);
+	void emit_bitfield_insert_op(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1, uint32_t op2,
+	                             uint32_t op3, const char *op, SPIRType::BaseType offset_count_type);
+	void emit_trinary_func_op_bitextract(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1,
+	                                     uint32_t op2, const char *op, SPIRType::BaseType expected_result_type,
+	                                     SPIRType::BaseType input_type0, SPIRType::BaseType input_type1,
+	                                     SPIRType::BaseType input_type2);
+	void emit_unary_func_op_cast(uint32_t result_type, uint32_t result_id, uint32_t op0, const char *op,
+	                             SPIRType::BaseType input_type, SPIRType::BaseType expected_result_type);
+	void emit_binary_func_op(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1, const char *op);
+	SPIRExpression &emit_uninitialized_temporary_expression(uint32_t type, uint32_t id);
+	SPIRType binary_op_bitcast_helper(std::string &cast_op0, std::string &cast_op1, SPIRType::BaseType &input_type,
+	                                  uint32_t op0, uint32_t op1, bool skip_cast_if_equal_type);
+	void flush_variable_declaration(uint32_t id);
+	spv::StorageClass get_expression_effective_storage_class(uint32_t ptr);
+	uint32_t get_integer_width_for_glsl_instruction(GLSLstd450 op, const uint32_t *arguments, uint32_t length) const;
+	GLSLstd450 get_remapped_glsl_op(GLSLstd450 std450_op) const;
+	void emit_trinary_func_op(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1, uint32_t op2,
+	                          const char *op);
+	const char *index_to_swizzle(uint32_t index);
+	void register_call_out_argument(uint32_t id);
+	void add_function_overload(const SPIRFunction &func);
+	bool expression_is_constant_null(uint32_t id) const;
+	std::string dereference_expression(const SPIRType &expression_type, const std::string &expr);
+	void strip_enclosed_expression(std::string &expr);
+	bool member_is_remapped_physical_type(const SPIRType &type, uint32_t index) const;
+	bool member_is_packed_physical_type(const SPIRType &type, uint32_t index) const;
+	bool is_stage_output_builtin_masked(spv::BuiltIn builtin) const;
+	std::string to_array_size(const SPIRType &type, uint32_t index);
+	std::string to_rerolled_array_expression(const SPIRType &parent_type, const std::string &expr, const SPIRType &type);
+
+
+	//Override methods
+	void GLSL_emit_store_statement(uint32_t lhs_expression, uint32_t rhs_expression);
+	void GLSL_emit_instruction(const Instruction &instr);
+	void GLSL_emit_texture_op(const Instruction &i, bool sparse);
+	void GLSL_emit_glsl_op(uint32_t result_type, uint32_t result_id, uint32_t op, const uint32_t *args,
+	                          uint32_t count);
+	void GLSL_emit_spv_amd_shader_trinary_minmax_op(uint32_t result_type, uint32_t result_id, uint32_t op,
+	                                                   const uint32_t *args, uint32_t count);
+	std::string GLSL_to_texture_op(const Instruction &i, bool sparse, bool *forward,
+	                                  SmallVector<uint32_t> &inherited_expressions);
+	std::string GLSL_to_func_call_arg(const SPIRFunction::Parameter &arg, uint32_t id);
+	std::string GLSL_convert_row_major_matrix(std::string exp_str, const SPIRType &exp_type,
+	                                             uint32_t physical_type_id, bool is_packed,
+	                                             bool relaxed = false);
+	void GLSL_replace_illegal_names();
+	std::string GLSL_type_to_array_glsl(
+	    const SPIRType &type); // Allow Metal to use the array<T> template to make arrays a value type
+	std::string GLSL_constant_op_expression(const SPIRConstantOp &cop);
+	std::string GLSL_variable_decl(const SPIRType &type, const std::string &name, uint32_t id = 0);
+	std::string GLSL_variable_decl(const SPIRVariable &variable);
+	std::string GLSL_builtin_to_glsl(spv::BuiltIn builtin, spv::StorageClass storage);
+	std::string GLSL_to_initializer_expression(const SPIRVariable &var);
 };
 } // namespace SPIRV_CROSS_NAMESPACE
 

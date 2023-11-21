@@ -37,22 +37,22 @@ static const uint32_t k_unknown_component = ~0u;
 static const char *force_inline = "static inline __attribute__((always_inline))";
 
 CompilerMSL::CompilerMSL(std::vector<uint32_t> spirv_)
-    : CompilerGLSL(std::move(spirv_))
+    : Compiler(std::move(spirv_))
 {
 }
 
 CompilerMSL::CompilerMSL(const uint32_t *ir_, size_t word_count)
-    : CompilerGLSL(ir_, word_count)
+    : Compiler(ir_, word_count)
 {
 }
 
 CompilerMSL::CompilerMSL(const ParsedIR &ir_)
-    : CompilerGLSL(ir_)
+    : Compiler(ir_)
 {
 }
 
 CompilerMSL::CompilerMSL(ParsedIR &&ir_)
-    : CompilerGLSL(std::move(ir_))
+    : Compiler(std::move(ir_))
 {
 }
 
@@ -4946,13 +4946,13 @@ void CompilerMSL::emit_store_statement(uint32_t lhs_expression, uint32_t rhs_exp
 			register_write(lhs_expression);
 		}
 		else
-			CompilerGLSL::emit_store_statement(lhs_expression, rhs_expression);
+			GLSL_emit_store_statement(lhs_expression, rhs_expression);
 	}
 	else if (!lhs_remapped_type && !is_matrix(type) && !transpose)
 	{
 		// Even if the target type is packed, we can directly store to it. We cannot store to packed matrices directly,
 		// since they are declared as array of vectors instead, and we need the fallback path below.
-		CompilerGLSL::emit_store_statement(lhs_expression, rhs_expression);
+		GLSL_emit_store_statement(lhs_expression, rhs_expression);
 	}
 	else
 	{
@@ -8454,14 +8454,14 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
 		if (is_tessellation_shader())
 		{
 			if (!emit_tessellation_io_load(ops[0], id, ptr))
-				CompilerGLSL::emit_instruction(instruction);
+				GLSL_emit_instruction(instruction);
 		}
 		else
 		{
 			// Sample mask input for Metal is not an array
 			if (BuiltIn(get_decoration(ptr, DecorationBuiltIn)) == BuiltInSampleMask)
 				set_decoration(id, DecorationBuiltIn, BuiltInSampleMask);
-			CompilerGLSL::emit_instruction(instruction);
+			GLSL_emit_instruction(instruction);
 		}
 		break;
 	}
@@ -9032,10 +9032,10 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
 		if (is_tessellation_shader())
 		{
 			if (!emit_tessellation_access_chain(ops, instruction.length))
-				CompilerGLSL::emit_instruction(instruction);
+				GLSL_emit_instruction(instruction);
 		}
 		else
-			CompilerGLSL::emit_instruction(instruction);
+			GLSL_emit_instruction(instruction);
 		fix_up_interpolant_access_chain(ops, instruction.length);
 		break;
 
@@ -9062,7 +9062,7 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
 			begin_scope();
 		}
 		if (!maybe_emit_array_assignment(ops[0], ops[1]))
-			CompilerGLSL::emit_instruction(instruction);
+			GLSL_emit_instruction(instruction);
 		if (needs_frag_discard_checks() &&
 		    (type.storage == StorageClassStorageBuffer || type.storage == StorageClassUniform))
 			end_scope();
@@ -9112,7 +9112,7 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
 	{
 		if (!msl_options.invariant_float_math && !has_decoration(ops[1], DecorationNoContraction))
 		{
-			CompilerGLSL::emit_instruction(instruction);
+			GLSL_emit_instruction(instruction);
 			break;
 		}
 
@@ -9154,7 +9154,7 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
 	{
 		if (!msl_options.invariant_float_math && !has_decoration(ops[1], DecorationNoContraction))
 		{
-			CompilerGLSL::emit_instruction(instruction);
+			GLSL_emit_instruction(instruction);
 			break;
 		}
 
@@ -9337,7 +9337,7 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
 	case OpDemoteToHelperInvocationEXT:
 		if (!msl_options.supports_msl_version(2, 3))
 			SPIRV_CROSS_THROW("discard_fragment() does not formally have demote semantics until MSL 2.3.");
-		CompilerGLSL::emit_instruction(instruction);
+		GLSL_emit_instruction(instruction);
 		break;
 
 	case OpIsHelperInvocationEXT:
@@ -9473,13 +9473,13 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
 			inherit_expression_dependencies(ops[1], ops[2]);
 		}
 		else
-			CompilerGLSL::emit_instruction(instruction);
+			GLSL_emit_instruction(instruction);
 
 		break;
 	}
 
 	default:
-		CompilerGLSL::emit_instruction(instruction);
+		GLSL_emit_instruction(instruction);
 		break;
 	}
 
@@ -9514,7 +9514,7 @@ void CompilerMSL::emit_texture_op(const Instruction &i, bool sparse)
 	}
 
 	// Fallback to default implementation
-	CompilerGLSL::emit_texture_op(i, sparse);
+	GLSL_emit_texture_op(i, sparse);
 }
 
 void CompilerMSL::emit_barrier(uint32_t id_exe_scope, uint32_t id_mem_scope, uint32_t id_mem_sem)
@@ -10241,7 +10241,7 @@ void CompilerMSL::emit_glsl_op(uint32_t result_type, uint32_t id, uint32_t eop, 
 			inherit_expression_dependencies(id, args[1]);
 		}
 		else
-			CompilerGLSL::emit_glsl_op(result_type, id, eop, args, count);
+			GLSL_emit_glsl_op(result_type, id, eop, args, count);
 		break;
 
 	case GLSLstd450Length:
@@ -10249,7 +10249,7 @@ void CompilerMSL::emit_glsl_op(uint32_t result_type, uint32_t id, uint32_t eop, 
 		if (expression_type(args[0]).vecsize == 1)
 			emit_unary_func_op(result_type, id, args[0], "abs");
 		else
-			CompilerGLSL::emit_glsl_op(result_type, id, eop, args, count);
+			GLSL_emit_glsl_op(result_type, id, eop, args, count);
 		break;
 
 	case GLSLstd450Normalize:
@@ -10270,21 +10270,21 @@ void CompilerMSL::emit_glsl_op(uint32_t result_type, uint32_t id, uint32_t eop, 
 		if (get<SPIRType>(result_type).vecsize == 1)
 			emit_binary_func_op(result_type, id, args[0], args[1], "spvReflect");
 		else
-			CompilerGLSL::emit_glsl_op(result_type, id, eop, args, count);
+			GLSL_emit_glsl_op(result_type, id, eop, args, count);
 		break;
 
 	case GLSLstd450Refract:
 		if (get<SPIRType>(result_type).vecsize == 1)
 			emit_trinary_func_op(result_type, id, args[0], args[1], args[2], "spvRefract");
 		else
-			CompilerGLSL::emit_glsl_op(result_type, id, eop, args, count);
+			GLSL_emit_glsl_op(result_type, id, eop, args, count);
 		break;
 
 	case GLSLstd450FaceForward:
 		if (get<SPIRType>(result_type).vecsize == 1)
 			emit_trinary_func_op(result_type, id, args[0], args[1], args[2], "spvFaceForward");
 		else
-			CompilerGLSL::emit_glsl_op(result_type, id, eop, args, count);
+			GLSL_emit_glsl_op(result_type, id, eop, args, count);
 		break;
 
 	case GLSLstd450Modf:
@@ -10317,12 +10317,12 @@ void CompilerMSL::emit_glsl_op(uint32_t result_type, uint32_t id, uint32_t eop, 
 			statement(to_expression(args[1]), " = ", to_expression(tmp_id), ";");
 		}
 		else
-			CompilerGLSL::emit_glsl_op(result_type, id, eop, args, count);
+			GLSL_emit_glsl_op(result_type, id, eop, args, count);
 		break;
 	}
 
 	default:
-		CompilerGLSL::emit_glsl_op(result_type, id, eop, args, count);
+		GLSL_emit_glsl_op(result_type, id, eop, args, count);
 		break;
 	}
 }
@@ -10356,7 +10356,7 @@ void CompilerMSL::emit_spv_amd_shader_trinary_minmax_op(uint32_t result_type, ui
 		emit_trinary_func_op(result_type, id, args[0], args[1], args[2], "median3");
 		break;
 	default:
-		CompilerGLSL::emit_spv_amd_shader_trinary_minmax_op(result_type, id, eop, args, count);
+		GLSL_emit_spv_amd_shader_trinary_minmax_op(result_type, id, eop, args, count);
 		break;
 	}
 }
@@ -11322,7 +11322,7 @@ string CompilerMSL::to_texture_op(const Instruction &i, bool sparse, bool *forwa
 		expr += "spvTextureSwizzle(";
 	}
 
-	string inner_expr = CompilerGLSL::to_texture_op(i, sparse, forward, inherited_expressions);
+	string inner_expr = GLSL_to_texture_op(i, sparse, forward, inherited_expressions);
 
 	if (constexpr_sampler && constexpr_sampler->ycbcr_conversion_enable && !is_dynamic_img_sampler)
 	{
@@ -11487,9 +11487,9 @@ string CompilerMSL::to_func_call_arg(const SPIRFunction::Parameter &arg, uint32_
 	// Dereference pointer variables where needed.
 	// FIXME: This dereference is actually backwards. We should really just support passing pointer variables between functions.
 	else if (should_dereference(id))
-		arg_str += dereference_expression(type, CompilerGLSL::to_func_call_arg(arg, id));
+		arg_str += dereference_expression(type, GLSL_to_func_call_arg(arg, id));
 	else
-		arg_str += CompilerGLSL::to_func_call_arg(arg, id);
+		arg_str += GLSL_to_func_call_arg(arg, id);
 
 	// Need to check the base variable in case we need to apply a qualified alias.
 	uint32_t var_id = 0;
@@ -11516,7 +11516,7 @@ string CompilerMSL::to_func_call_arg(const SPIRFunction::Parameter &arg, uint32_
 					add_spv_func_and_recompile(SPVFuncImplDynamicImageSampler);
 			}
 			for (uint32_t i = 1; i < planes; i++)
-				arg_str += join(", ", CompilerGLSL::to_func_call_arg(arg, id), plane_name_suffix, i);
+				arg_str += join(", ", GLSL_to_func_call_arg(arg, id), plane_name_suffix, i);
 			// Manufacture automatic sampler arg if the arg is a SampledImage texture.
 			if (type.image.dim != DimBuffer)
 				arg_str += ", " + to_sampler_expression(var_id ? var_id : id);
@@ -11720,7 +11720,7 @@ string CompilerMSL::convert_row_major_matrix(string exp_str, const SPIRType &exp
 {
 	if (!is_matrix(exp_type))
 	{
-		return CompilerGLSL::convert_row_major_matrix(std::move(exp_str), exp_type, physical_type_id, is_packed, relaxed);
+		return GLSL_convert_row_major_matrix(std::move(exp_str), exp_type, physical_type_id, is_packed, relaxed);
 	}
 	else
 	{
@@ -14714,7 +14714,7 @@ void CompilerMSL::replace_illegal_names()
 				mbr_dec.alias += "0";
 	});
 
-	CompilerGLSL::replace_illegal_names();
+	GLSL_replace_illegal_names();
 }
 
 void CompilerMSL::replace_illegal_entry_point_names()
@@ -15005,11 +15005,11 @@ string CompilerMSL::type_to_array_glsl(const SPIRType &type)
 	case SPIRType::AtomicCounter:
 	case SPIRType::ControlPointArray:
 	case SPIRType::RayQuery:
-		return CompilerGLSL::type_to_array_glsl(type);
+		return GLSL_type_to_array_glsl(type);
 
 	default:
 		if (type_is_array_of_pointers(type) || using_builtin_array())
-			return CompilerGLSL::type_to_array_glsl(type);
+			return GLSL_type_to_array_glsl(type);
 		else
 			return "";
 	}
@@ -15023,7 +15023,7 @@ string CompilerMSL::constant_op_expression(const SPIRConstantOp &cop)
 		add_spv_func_and_recompile(SPVFuncImplQuantizeToF16);
 		return join("spvQuantizeToF16(", to_expression(cop.arguments[0]), ")");
 	default:
-		return CompilerGLSL::constant_op_expression(cop);
+		return GLSL_constant_op_expression(cop);
 	}
 }
 
@@ -15076,7 +15076,7 @@ std::string CompilerMSL::variable_decl(const SPIRVariable &variable)
 	if (variable_decl_is_remapped_storage(variable, StorageClassWorkgroup))
 		is_using_builtin_array = true;
 
-	auto expr = CompilerGLSL::variable_decl(variable);
+	auto expr = GLSL_variable_decl(variable);
 	is_using_builtin_array = old_is_using_builtin_array;
 	return expr;
 }
@@ -15084,7 +15084,7 @@ std::string CompilerMSL::variable_decl(const SPIRVariable &variable)
 // GCC workaround of lambdas calling protected funcs
 std::string CompilerMSL::variable_decl(const SPIRType &type, const std::string &name, uint32_t id)
 {
-	return CompilerGLSL::variable_decl(type, name, id);
+	return GLSL_variable_decl(type, name, id);
 }
 
 std::string CompilerMSL::sampler_type(const SPIRType &type, uint32_t id)
@@ -15816,7 +15816,7 @@ string CompilerMSL::builtin_to_glsl(BuiltIn builtin, StorageClass storage)
 			break;
 		if (storage != StorageClassInput && current_function && (current_function->self == ir.default_entry_point) &&
 		    !is_stage_output_builtin_masked(builtin))
-			return stage_out_var_name + "." + CompilerGLSL::builtin_to_glsl(builtin, storage);
+			return stage_out_var_name + "." + GLSL_builtin_to_glsl(builtin, storage);
 		break;
 
 	case BuiltInSampleMask:
@@ -15824,7 +15824,7 @@ string CompilerMSL::builtin_to_glsl(BuiltIn builtin, StorageClass storage)
 			(has_additional_fixed_sample_mask() || needs_sample_id))
 		{
 			string samp_mask_in;
-			samp_mask_in += "(" + CompilerGLSL::builtin_to_glsl(builtin, storage);
+			samp_mask_in += "(" + GLSL_builtin_to_glsl(builtin, storage);
 			if (has_additional_fixed_sample_mask())
 				samp_mask_in += " & " + additional_fixed_sample_mask_str();
 			if (needs_sample_id)
@@ -15834,13 +15834,13 @@ string CompilerMSL::builtin_to_glsl(BuiltIn builtin, StorageClass storage)
 		}
 		if (storage != StorageClassInput && current_function && (current_function->self == ir.default_entry_point) &&
 		    !is_stage_output_builtin_masked(builtin))
-			return stage_out_var_name + "." + CompilerGLSL::builtin_to_glsl(builtin, storage);
+			return stage_out_var_name + "." + GLSL_builtin_to_glsl(builtin, storage);
 		break;
 
 	case BuiltInBaryCoordKHR:
 	case BuiltInBaryCoordNoPerspKHR:
 		if (storage == StorageClassInput && current_function && (current_function->self == ir.default_entry_point))
-			return stage_in_var_name + "." + CompilerGLSL::builtin_to_glsl(builtin, storage);
+			return stage_in_var_name + "." + GLSL_builtin_to_glsl(builtin, storage);
 		break;
 
 	case BuiltInTessLevelOuter:
@@ -15875,7 +15875,7 @@ string CompilerMSL::builtin_to_glsl(BuiltIn builtin, StorageClass storage)
 		break;
 	}
 
-	return CompilerGLSL::builtin_to_glsl(builtin, storage);
+	return GLSL_builtin_to_glsl(builtin, storage);
 }
 
 // Returns an MSL string attribute qualifer for a SPIR-V builtin
@@ -17308,7 +17308,7 @@ string CompilerMSL::to_initializer_expression(const SPIRVariable &var)
 	    (!type.array.empty() || type.basetype == SPIRType::Struct))
 		expr = constant_expression(get<SPIRConstant>(var.initializer));
 	else
-		expr = CompilerGLSL::to_initializer_expression(var);
+		expr = GLSL_to_initializer_expression(var);
 	// If the initializer has more vector components than the variable, add a swizzle.
 	// FIXME: This can't handle arrays or structs.
 	auto &init_type = expression_type(var.initializer);
