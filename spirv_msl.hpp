@@ -212,6 +212,32 @@ enum MSLSamplerYCbCrRange
 	MSL_SAMPLER_YCBCR_RANGE_INT_MAX = 0x7fffffff
 };
 
+enum PlsFormat
+{
+	PlsNone = 0,
+
+	PlsR11FG11FB10F,
+	PlsR32F,
+	PlsRG16F,
+	PlsRGB10A2,
+	PlsRGBA8,
+	PlsRG16,
+
+	PlsRGBA8I,
+	PlsRG16I,
+
+	PlsRGB10A2UI,
+	PlsRGBA8UI,
+	PlsRG16UI,
+	PlsR32UI
+};
+
+struct PlsRemap
+{
+	uint32_t id;
+	PlsFormat format;
+};
+
 struct MSLConstexprSampler
 {
 	MSLSamplerCoord coord = MSL_SAMPLER_COORD_NORMALIZED;
@@ -1457,6 +1483,92 @@ protected:
 
 	GLSLOptions options;
 
+	struct ShaderSubgroupSupportHelper
+	{
+		// lower enum value = greater priority
+		enum Candidate
+		{
+			KHR_shader_subgroup_ballot,
+			KHR_shader_subgroup_basic,
+			KHR_shader_subgroup_vote,
+			KHR_shader_subgroup_arithmetic,
+			NV_gpu_shader_5,
+			NV_shader_thread_group,
+			NV_shader_thread_shuffle,
+			ARB_shader_ballot,
+			ARB_shader_group_vote,
+			AMD_gcn_shader,
+
+			CandidateCount
+		};
+
+		static const char *get_extension_name(Candidate c);
+		static SmallVector<std::string> get_extra_required_extension_names(Candidate c);
+		static const char *get_extra_required_extension_predicate(Candidate c);
+
+		enum Feature
+		{
+			SubgroupMask = 0,
+			SubgroupSize = 1,
+			SubgroupInvocationID = 2,
+			SubgroupID = 3,
+			NumSubgroups = 4,
+			SubgroupBroadcast_First = 5,
+			SubgroupBallotFindLSB_MSB = 6,
+			SubgroupAll_Any_AllEqualBool = 7,
+			SubgroupAllEqualT = 8,
+			SubgroupElect = 9,
+			SubgroupBarrier = 10,
+			SubgroupMemBarrier = 11,
+			SubgroupBallot = 12,
+			SubgroupInverseBallot_InclBitCount_ExclBitCout = 13,
+			SubgroupBallotBitExtract = 14,
+			SubgroupBallotBitCount = 15,
+			SubgroupArithmeticIAddReduce = 16,
+			SubgroupArithmeticIAddExclusiveScan = 17,
+			SubgroupArithmeticIAddInclusiveScan = 18,
+			SubgroupArithmeticFAddReduce = 19,
+			SubgroupArithmeticFAddExclusiveScan = 20,
+			SubgroupArithmeticFAddInclusiveScan = 21,
+			SubgroupArithmeticIMulReduce = 22,
+			SubgroupArithmeticIMulExclusiveScan = 23,
+			SubgroupArithmeticIMulInclusiveScan = 24,
+			SubgroupArithmeticFMulReduce = 25,
+			SubgroupArithmeticFMulExclusiveScan = 26,
+			SubgroupArithmeticFMulInclusiveScan = 27,
+			FeatureCount
+		};
+
+		using FeatureMask = uint32_t;
+		static_assert(sizeof(FeatureMask) * 8u >= FeatureCount, "Mask type needs more bits.");
+
+		using CandidateVector = SmallVector<Candidate, CandidateCount>;
+		using FeatureVector = SmallVector<Feature>;
+
+		static FeatureVector get_feature_dependencies(Feature feature);
+		static FeatureMask get_feature_dependency_mask(Feature feature);
+		static bool can_feature_be_implemented_without_extensions(Feature feature);
+		static Candidate get_KHR_extension_for_feature(Feature feature);
+
+		struct Result
+		{
+			Result();
+			uint32_t weights[CandidateCount];
+		};
+
+		void request_feature(Feature feature);
+		bool is_feature_requested(Feature feature) const;
+		Result resolve() const;
+
+		static CandidateVector get_candidates_for_feature(Feature ft, const Result &r);
+
+	private:
+		static CandidateVector get_candidates_for_feature(Feature ft);
+		static FeatureMask build_mask(const SmallVector<Feature> &features);
+		FeatureMask feature_mask = 0;
+	};
+
+
 	struct BackendVariations
 	{
 		std::string discard_literal = "discard";
@@ -1538,7 +1650,7 @@ protected:
 	SmallVector<SPIRBlock *> current_emitting_switch_stack;
 	std::unordered_map<std::string, std::unordered_set<uint64_t>> function_overloads;
 	std::unordered_map<uint32_t, uint32_t> temporary_to_mirror_precision_alias;
-
+	std::unordered_map<uint32_t, SmallVector<ConstantID>> const_composite_insert_ids;
 	std::unordered_set<std::string> block_names; // A union of all block_*_names.
 	std::unordered_map<uint32_t, std::string> preserved_aliases;
 	std::unordered_set<std::string> block_input_names;
@@ -1546,13 +1658,15 @@ protected:
 	std::unordered_set<std::string> block_ubo_names;
 	std::unordered_set<std::string> block_ssbo_names;
 	std::unordered_set<LocationComponentPair, InternalHasher> masked_output_locations;
+	
 	bool processing_entry_point = false;
 	bool block_debug_directives = false;
 	const SPIRBlock *current_continue_block = nullptr;
 	bool block_temporary_hoisting = false;
 	char current_locale_radix_character = '.';
 	bool current_emitting_switch_fallthrough = false;
-
+	bool ray_tracing_is_khr = false;
+	bool barycentric_is_nv = false;
 	uint32_t statement_count = 0;
 	StringStream<> buffer;
 	SPIRBlock *current_emitting_block = nullptr;
@@ -1797,9 +1911,86 @@ protected:
 	std::string emit_for_loop_initializers(const SPIRBlock &block);
 	void emit_mesh_tasks(SPIRBlock &block);
 	bool for_loop_initializers_are_same_type(const SPIRBlock &block);
+	void handle_store_to_invariant_variable(uint32_t store_id, uint32_t value_id);
+	bool unroll_array_to_complex_store(uint32_t target_id, uint32_t source_id);
+	void convert_non_uniform_expression(std::string &expr, uint32_t ptr_id);
+	void disallow_forwarding_in_expression_chain(const SPIRExpression &expr);
+	void emit_sparse_feedback_temporaries(uint32_t result_type_id, uint32_t id, uint32_t &feedback_id,
+	                                      uint32_t &texel_id);
+	void emit_binary_func_op_cast(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1, const char *op,
+	                              SPIRType::BaseType input_type, bool skip_cast_if_equal_type);
+	void emit_trinary_func_op_cast(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1, uint32_t op2,
+	                               const char *op, SPIRType::BaseType input_type);
+	void emit_emulated_ahyper_op(uint32_t result_type, uint32_t result_id, uint32_t op0, GLSLstd450 op);
+	void emit_mix_op(uint32_t result_type, uint32_t id, uint32_t left, uint32_t right, uint32_t lerp);
+	void emit_nminmax_op(uint32_t result_type, uint32_t id, uint32_t op0, uint32_t op1, GLSLstd450 op);
+	std::string to_ternary_expression(const SPIRType &result_type, uint32_t select, uint32_t true_value,
+	                                  uint32_t false_value);
+	bool to_trivial_mix_op(const SPIRType &type, std::string &op, uint32_t left, uint32_t right, uint32_t lerp);
+	std::string to_enclosed_pointer_expression(uint32_t id, bool register_expression_read = true);
+
+
+	enum Polyfill : uint32_t
+	{
+		PolyfillTranspose2x2 = 1 << 0,
+		PolyfillTranspose3x3 = 1 << 1,
+		PolyfillTranspose4x4 = 1 << 2,
+		PolyfillDeterminant2x2 = 1 << 3,
+		PolyfillDeterminant3x3 = 1 << 4,
+		PolyfillDeterminant4x4 = 1 << 5,
+		PolyfillMatrixInverse2x2 = 1 << 6,
+		PolyfillMatrixInverse3x3 = 1 << 7,
+		PolyfillMatrixInverse4x4 = 1 << 8,
+	};
+	std::vector<PlsRemap> pls_inputs;
+
+
+	uint32_t required_polyfills = 0;
+	uint32_t required_polyfills_relaxed = 0;
+	ShaderSubgroupSupportHelper shader_subgroup_supporter;
+	void require_polyfill(Polyfill polyfill, bool relaxed);
+	uint32_t get_sparse_feedback_texel_id(uint32_t id) const;
+	SmallVector<ConstantID> get_composite_constant_ids(ConstantID const_id);
+	void set_composite_constant(ConstantID const_id, TypeID type_id, const SmallVector<ConstantID> &initializers);
+	TypeID get_composite_member_type(TypeID type_id, uint32_t member_idx);
+	void fill_composite_constant(SPIRConstant &constant, TypeID type_id, const SmallVector<ConstantID> &initializers);
+	void request_subgroup_feature(ShaderSubgroupSupportHelper::Feature feature);
+	void unroll_array_from_complex_load(uint32_t target_id, uint32_t source_id, std::string &expr);
+	void rewrite_load_for_wrapped_row_major(std::string &expr, TypeID loaded_type, ID ptr);
+	bool expression_is_non_value_type_array(uint32_t ptr);
+	void store_flattened_struct(uint32_t lhs_id, uint32_t value);
+	void register_impure_function_call();
+	std::string to_combined_image_sampler(VariableID image_id, VariableID samp_id);
+	void append_global_func_args(const SPIRFunction &func, uint32_t index, SmallVector<std::string> &arglist);
+	void check_function_call_constraints(const uint32_t *args, uint32_t length);
+	bool args_will_forward(uint32_t id, const uint32_t *args, uint32_t num_args, bool pure);
+	std::string build_composite_combiner(uint32_t result_type, const uint32_t *elems, uint32_t length);
+	std::string to_extract_constant_composite_expression(uint32_t result_type, const SPIRConstant &c,
+	                                                     const uint32_t *chain, uint32_t length);
+	bool should_suppress_usage_tracking(uint32_t id) const;
+	void emit_copy_logical_type(uint32_t lhs_id, uint32_t lhs_type_id, uint32_t rhs_id, uint32_t rhs_type_id,
+	                            SmallVector<uint32_t> chain);
+	void emit_unary_op_cast(uint32_t result_type, uint32_t result_id, uint32_t op0, const char *op);
+	void emit_unary_op(uint32_t result_type, uint32_t result_id, uint32_t op0, const char *op);
+	void emit_unrolled_binary_op(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1, const char *op,
+	                             bool negate, SPIRType::BaseType expected_type);
+	bool check_atomic_image(uint32_t id);
+	void emit_atomic_func_op(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1, const char *op);
+	void emit_atomic_func_op(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1, uint32_t op2, const char *op);
+	std::string to_non_uniform_aware_expression(uint32_t id);
+	std::string convert_separate_image_to_expression(uint32_t id);
+	std::string legacy_tex_op(const std::string &op, const SPIRType &imgtype, uint32_t id);
+	bool subpass_input_is_framebuffer_fetch(uint32_t id) const;
+	static uint32_t mask_relevant_memory_semantics(uint32_t semantics);
+	const Instruction *get_next_instruction_in_block(const Instruction &instr);
+	void emit_spv_amd_shader_ballot_op(uint32_t result_type, uint32_t result_id, uint32_t op,
+	                                          const uint32_t *args, uint32_t count);
+	void emit_spv_amd_shader_explicit_vertex_parameter_op(uint32_t result_type, uint32_t result_id, uint32_t op,
+	                                                              const uint32_t *args, uint32_t count);
+	void emit_spv_amd_gcn_shader_op(uint32_t result_type, uint32_t result_id, uint32_t op, const uint32_t *args,
+	                                        uint32_t count);
 	//Override methods
 	void GLSL_emit_store_statement(uint32_t lhs_expression, uint32_t rhs_expression);
-	void GLSL_emit_instruction(const Instruction &instr);
 	void GLSL_emit_texture_op(const Instruction &i, bool sparse);
 	void GLSL_emit_glsl_op(uint32_t result_type, uint32_t result_id, uint32_t op, const uint32_t *args,
 	                          uint32_t count);
@@ -1812,6 +2003,7 @@ protected:
 	                                             uint32_t physical_type_id, bool is_packed,
 	                                             bool relaxed = false);
 	void GLSL_replace_illegal_names();
+	void GLSL_replace_illegal_names(const std::unordered_set<std::string> &keywords);
 	std::string GLSL_type_to_array_glsl(
 	    const SPIRType &type); // Allow Metal to use the array<T> template to make arrays a value type
 	std::string GLSL_constant_op_expression(const SPIRConstantOp &cop);
@@ -1819,6 +2011,7 @@ protected:
 	std::string GLSL_variable_decl(const SPIRVariable &variable);
 	std::string GLSL_builtin_to_glsl(spv::BuiltIn builtin, spv::StorageClass storage);
 	std::string GLSL_to_initializer_expression(const SPIRVariable &var);
+	void GLSL_emit_instruction(const Instruction &instr);
 };
 } // namespace SPIRV_CROSS_NAMESPACE
 
