@@ -1536,12 +1536,22 @@ protected:
 	std::unordered_set<uint32_t> masked_output_builtins;
 	std::unordered_set<uint32_t> flattened_buffer_blocks;
 	SmallVector<SPIRBlock *> current_emitting_switch_stack;
+	std::unordered_map<std::string, std::unordered_set<uint64_t>> function_overloads;
+	std::unordered_map<uint32_t, uint32_t> temporary_to_mirror_precision_alias;
 
 	std::unordered_set<std::string> block_names; // A union of all block_*_names.
+	std::unordered_map<uint32_t, std::string> preserved_aliases;
+	std::unordered_set<std::string> block_input_names;
+	std::unordered_set<std::string> block_output_names;
+	std::unordered_set<std::string> block_ubo_names;
+	std::unordered_set<std::string> block_ssbo_names;
+	std::unordered_set<LocationComponentPair, InternalHasher> masked_output_locations;
 	bool processing_entry_point = false;
+	bool block_debug_directives = false;
 	const SPIRBlock *current_continue_block = nullptr;
 	bool block_temporary_hoisting = false;
 	char current_locale_radix_character = '.';
+	bool current_emitting_switch_fallthrough = false;
 
 	uint32_t statement_count = 0;
 	StringStream<> buffer;
@@ -1600,6 +1610,16 @@ protected:
 	inline bool is_legacy() const
 	{
 		return (options.es && options.version < 300) || (!options.es && options.version < 130);
+	}
+
+	inline bool is_legacy_es() const
+	{
+		return options.es && options.version < 300;
+	}
+
+	inline bool is_legacy_desktop() const
+	{
+		return !options.es && options.version < 130;
 	}
 
 	void add_resource_name(uint32_t id);
@@ -1726,6 +1746,7 @@ protected:
 	SPIRType binary_op_bitcast_helper(std::string &cast_op0, std::string &cast_op1, SPIRType::BaseType &input_type,
 	                                  uint32_t op0, uint32_t op1, bool skip_cast_if_equal_type);
 	void flush_variable_declaration(uint32_t id);
+	void emit_variable_temporary_copies(const SPIRVariable &var);
 	spv::StorageClass get_expression_effective_storage_class(uint32_t ptr);
 	uint32_t get_integer_width_for_glsl_instruction(GLSLstd450 op, const uint32_t *arguments, uint32_t length) const;
 	GLSLstd450 get_remapped_glsl_op(GLSLstd450 std450_op) const;
@@ -1751,7 +1772,31 @@ protected:
 	void emit_block_chain(SPIRBlock &block);
 	bool is_stage_output_location_masked(uint32_t location, uint32_t component) const;
 	bool remove_duplicate_swizzle(std::string &op);
+	void emit_hoisted_temporaries(SmallVector<std::pair<TypeID, ID>> &temporaries);
+	void flush_undeclared_variables(SPIRBlock &block);
+	void emit_while_loop_initializers(const SPIRBlock &block);
+	void emit_block_instructions(SPIRBlock &block);
+	std::string emit_continue_block(uint32_t continue_block, bool follow_true_block, bool follow_false_block);
 
+	struct TemporaryCopy
+	{
+		uint32_t dst_id;
+		uint32_t src_id;
+	};
+	TemporaryCopy handle_instruction_precision(const Instruction &instr);
+	void analyze_precision_requirements(uint32_t type_id, uint32_t dst_id, uint32_t *args, uint32_t length);
+	GLSLOptions::Precision analyze_expression_precision(const uint32_t *args, uint32_t length) const;
+	uint32_t consume_temporary_in_precision_context(uint32_t type_id, uint32_t id, GLSLOptions::Precision precision);
+	void forward_relaxed_precision(uint32_t dst_id, const uint32_t *args, uint32_t length);
+	void branch(BlockID from, BlockID to);
+	void branch(BlockID from, uint32_t cond, BlockID true_block, BlockID false_block);
+	void branch_to_continue(BlockID from, BlockID to);
+	void flush_phi(BlockID from, BlockID to);
+	bool attempt_emit_loop_header(SPIRBlock &block, SPIRBlock::Method method);
+	void emit_block_instructions_with_masked_debug(SPIRBlock &block);
+	std::string emit_for_loop_initializers(const SPIRBlock &block);
+	void emit_mesh_tasks(SPIRBlock &block);
+	bool for_loop_initializers_are_same_type(const SPIRBlock &block);
 	//Override methods
 	void GLSL_emit_store_statement(uint32_t lhs_expression, uint32_t rhs_expression);
 	void GLSL_emit_instruction(const Instruction &instr);

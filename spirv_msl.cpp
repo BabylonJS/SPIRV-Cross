@@ -36,6 +36,113 @@ static const uint32_t k_unknown_location = ~0u;
 static const uint32_t k_unknown_component = ~0u;
 static const char *force_inline = "static inline __attribute__((always_inline))";
 
+// This is probably not exhaustive ...
+static bool opcode_is_precision_sensitive_operation(Op op)
+{
+	switch (op)
+	{
+	case OpFAdd:
+	case OpFSub:
+	case OpFMul:
+	case OpFNegate:
+	case OpIAdd:
+	case OpISub:
+	case OpIMul:
+	case OpSNegate:
+	case OpFMod:
+	case OpFDiv:
+	case OpFRem:
+	case OpSMod:
+	case OpSDiv:
+	case OpSRem:
+	case OpUMod:
+	case OpUDiv:
+	case OpVectorTimesMatrix:
+	case OpMatrixTimesVector:
+	case OpMatrixTimesMatrix:
+	case OpDPdx:
+	case OpDPdy:
+	case OpDPdxCoarse:
+	case OpDPdyCoarse:
+	case OpDPdxFine:
+	case OpDPdyFine:
+	case OpFwidth:
+	case OpFwidthCoarse:
+	case OpFwidthFine:
+	case OpVectorTimesScalar:
+	case OpMatrixTimesScalar:
+	case OpOuterProduct:
+	case OpFConvert:
+	case OpSConvert:
+	case OpUConvert:
+	case OpConvertSToF:
+	case OpConvertUToF:
+	case OpConvertFToU:
+	case OpConvertFToS:
+		return true;
+
+	default:
+		return false;
+	}
+}
+
+// Instructions which just load data but don't do any arithmetic operation should just inherit the decoration.
+// SPIR-V doesn't require this, but it's somewhat implied it has to work this way, relaxed precision is only
+// relevant when operating on the IDs, not when shuffling things around.
+static bool opcode_is_precision_forwarding_instruction(Op op, uint32_t &arg_count)
+{
+	switch (op)
+	{
+	case OpLoad:
+	case OpAccessChain:
+	case OpInBoundsAccessChain:
+	case OpCompositeExtract:
+	case OpVectorExtractDynamic:
+	case OpSampledImage:
+	case OpImage:
+	case OpCopyObject:
+
+	case OpImageRead:
+	case OpImageFetch:
+	case OpImageSampleImplicitLod:
+	case OpImageSampleProjImplicitLod:
+	case OpImageSampleDrefImplicitLod:
+	case OpImageSampleProjDrefImplicitLod:
+	case OpImageSampleExplicitLod:
+	case OpImageSampleProjExplicitLod:
+	case OpImageSampleDrefExplicitLod:
+	case OpImageSampleProjDrefExplicitLod:
+	case OpImageGather:
+	case OpImageDrefGather:
+	case OpImageSparseRead:
+	case OpImageSparseFetch:
+	case OpImageSparseSampleImplicitLod:
+	case OpImageSparseSampleProjImplicitLod:
+	case OpImageSparseSampleDrefImplicitLod:
+	case OpImageSparseSampleProjDrefImplicitLod:
+	case OpImageSparseSampleExplicitLod:
+	case OpImageSparseSampleProjExplicitLod:
+	case OpImageSparseSampleDrefExplicitLod:
+	case OpImageSparseSampleProjDrefExplicitLod:
+	case OpImageSparseGather:
+	case OpImageSparseDrefGather:
+		arg_count = 1;
+		return true;
+
+	case OpVectorShuffle:
+		arg_count = 2;
+		return true;
+
+	case OpCompositeConstruct:
+		return true;
+
+	default:
+		break;
+	}
+
+	return false;
+}
+
 CompilerMSL::CompilerMSL(std::vector<uint32_t> spirv_)
     : Compiler(std::move(spirv_))
 {
@@ -21391,4 +21498,2084 @@ void CompilerMSL::flush_variable_declaration(uint32_t id)
 	{
 		emit_variable_temporary_copies(*var);
 	}
+}
+
+void CompilerMSL::emit_variable_temporary_copies(const SPIRVariable &var)
+{
+	// Ensure that we declare phi-variable copies even if the original declaration isn't deferred
+	if (var.allocate_temporary_copy && !flushed_phi_variables.count(var.self))
+	{
+		auto &type = get<SPIRType>(var.basetype);
+		auto &flags = get_decoration_bitset(var.self);
+		statement(flags_to_qualifiers_glsl(type, flags), variable_decl(type, join("_", var.self, "_copy")), ";");
+		flushed_phi_variables.insert(var.self);
+	}
+}
+
+StorageClass CompilerMSL::get_expression_effective_storage_class(uint32_t ptr)
+{
+	auto *var = maybe_get_backing_variable(ptr);
+
+	// If the expression has been lowered to a temporary, we need to use the Generic storage class.
+	// We're looking for the effective storage class of a given expression.
+	// An access chain or forwarded OpLoads from such access chains
+	// will generally have the storage class of the underlying variable, but if the load was not forwarded
+	// we have lost any address space qualifiers.
+	bool forced_temporary = ir.ids[ptr].get_type() == TypeExpression && !get<SPIRExpression>(ptr).access_chain &&
+	                        (forced_temporaries.count(ptr) != 0 || forwarded_temporaries.count(ptr) == 0);
+
+	if (var && !forced_temporary)
+	{
+		if (variable_decl_is_remapped_storage(*var, StorageClassWorkgroup))
+			return StorageClassWorkgroup;
+		if (variable_decl_is_remapped_storage(*var, StorageClassStorageBuffer))
+			return StorageClassStorageBuffer;
+
+		// Normalize SSBOs to StorageBuffer here.
+		if (var->storage == StorageClassUniform &&
+		    has_decoration(get<SPIRType>(var->basetype).self, DecorationBufferBlock))
+			return StorageClassStorageBuffer;
+		else
+			return var->storage;
+	}
+	else
+		return expression_type(ptr).storage;
+}
+
+uint32_t CompilerMSL::get_integer_width_for_glsl_instruction(GLSLstd450 op, const uint32_t *ops, uint32_t length) const
+{
+	if (length < 1)
+		return 32;
+
+	switch (op)
+	{
+	case GLSLstd450SAbs:
+	case GLSLstd450SSign:
+	case GLSLstd450UMin:
+	case GLSLstd450SMin:
+	case GLSLstd450UMax:
+	case GLSLstd450SMax:
+	case GLSLstd450UClamp:
+	case GLSLstd450SClamp:
+	case GLSLstd450FindSMsb:
+	case GLSLstd450FindUMsb:
+		return expression_type(ops[0]).width;
+
+	default:
+	{
+		// We don't need to care about other opcodes, just return 32.
+		return 32;
+	}
+	}
+}
+
+GLSLstd450 CompilerMSL::get_remapped_glsl_op(GLSLstd450 std450_op) const
+{
+	// Relax to non-NaN aware opcodes.
+	if (options.relax_nan_checks)
+	{
+		switch (std450_op)
+		{
+		case GLSLstd450NClamp:
+			std450_op = GLSLstd450FClamp;
+			break;
+		case GLSLstd450NMin:
+			std450_op = GLSLstd450FMin;
+			break;
+		case GLSLstd450NMax:
+			std450_op = GLSLstd450FMax;
+			break;
+		default:
+			break;
+		}
+	}
+
+	return std450_op;
+}
+
+void CompilerMSL::emit_trinary_func_op(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1,
+                                        uint32_t op2, const char *op)
+{
+	bool forward = should_forward(op0) && should_forward(op1) && should_forward(op2);
+	emit_op(result_type, result_id,
+	        join(op, "(", to_unpacked_expression(op0), ", ", to_unpacked_expression(op1), ", ",
+	             to_unpacked_expression(op2), ")"),
+	        forward);
+
+	inherit_expression_dependencies(result_id, op0);
+	inherit_expression_dependencies(result_id, op1);
+	inherit_expression_dependencies(result_id, op2);
+}
+
+const char *CompilerMSL::index_to_swizzle(uint32_t index)
+{
+	switch (index)
+	{
+	case 0:
+		return "x";
+	case 1:
+		return "y";
+	case 2:
+		return "z";
+	case 3:
+		return "w";
+	default:
+		return "x";		// Don't crash, but engage the "undefined behavior" described for out-of-bounds logical addressing in spec.
+	}
+}
+
+void CompilerMSL::register_call_out_argument(uint32_t id)
+{
+	register_write(id);
+
+	auto *var = maybe_get<SPIRVariable>(id);
+	if (var)
+		flush_variable_declaration(var->self);
+}
+
+void CompilerMSL::add_function_overload(const SPIRFunction &func)
+{
+	Hasher hasher;
+	for (auto &arg : func.arguments)
+	{
+		// Parameters can vary with pointer type or not,
+		// but that will not change the signature in GLSL/HLSL,
+		// so strip the pointer type before hashing.
+		uint32_t type_id = get_pointee_type_id(arg.type);
+		auto &type = get<SPIRType>(type_id);
+
+		if (!combined_image_samplers.empty())
+		{
+			// If we have combined image samplers, we cannot really trust the image and sampler arguments
+			// we pass down to callees, because they may be shuffled around.
+			// Ignore these arguments, to make sure that functions need to differ in some other way
+			// to be considered different overloads.
+			if (type.basetype == SPIRType::SampledImage ||
+			    (type.basetype == SPIRType::Image && type.image.sampled == 1) || type.basetype == SPIRType::Sampler)
+			{
+				continue;
+			}
+		}
+
+		hasher.u32(type_id);
+	}
+	uint64_t types_hash = hasher.get();
+
+	auto function_name = to_name(func.self);
+	auto itr = function_overloads.find(function_name);
+	if (itr != end(function_overloads))
+	{
+		// There exists a function with this name already.
+		auto &overloads = itr->second;
+		if (overloads.count(types_hash) != 0)
+		{
+			// Overload conflict, assign a new name.
+			add_resource_name(func.self);
+			function_overloads[to_name(func.self)].insert(types_hash);
+		}
+		else
+		{
+			// Can reuse the name.
+			overloads.insert(types_hash);
+		}
+	}
+	else
+	{
+		// First time we see this function name.
+		add_resource_name(func.self);
+		function_overloads[to_name(func.self)].insert(types_hash);
+	}
+}
+
+bool CompilerMSL::expression_is_constant_null(uint32_t id) const
+{
+	auto *c = maybe_get<SPIRConstant>(id);
+	if (!c)
+		return false;
+	return c->constant_is_null();
+}
+
+string CompilerMSL::dereference_expression(const SPIRType &expr_type, const std::string &expr)
+{
+	// If this expression starts with an address-of operator ('&'), then
+	// just return the part after the operator.
+	// TODO: Strip parens if unnecessary?
+	if (expr.front() == '&')
+		return expr.substr(1);
+	else if (backend.native_pointers)
+		return join('*', expr);
+	else if (expr_type.storage == StorageClassPhysicalStorageBufferEXT && expr_type.basetype != SPIRType::Struct &&
+	         expr_type.pointer_depth == 1)
+	{
+		return join(enclose_expression(expr), ".value");
+	}
+	else
+		return expr;
+}
+
+// Sometimes we proactively enclosed an expression where it turns out we might have not needed it after all.
+void CompilerMSL::strip_enclosed_expression(string &expr)
+{
+	if (expr.size() < 2 || expr.front() != '(' || expr.back() != ')')
+		return;
+
+	// Have to make sure that our first and last parens actually enclose everything inside it.
+	uint32_t paren_count = 0;
+	for (auto &c : expr)
+	{
+		if (c == '(')
+			paren_count++;
+		else if (c == ')')
+		{
+			paren_count--;
+
+			// If we hit 0 and this is not the final char, our first and final parens actually don't
+			// enclose the expression, and we cannot strip, e.g.: (a + b) * (c + d).
+			if (paren_count == 0 && &c != &expr.back())
+				return;
+		}
+	}
+	expr.erase(expr.size() - 1, 1);
+	expr.erase(begin(expr));
+}
+
+// Checks if we need to remap physical type IDs when declaring the type in a buffer.
+bool CompilerMSL::member_is_remapped_physical_type(const SPIRType &type, uint32_t index) const
+{
+	return has_extended_member_decoration(type.self, index, SPIRVCrossDecorationPhysicalTypeID);
+}
+
+// Checks whether the member is in packed data type, that might need to be unpacked.
+bool CompilerMSL::member_is_packed_physical_type(const SPIRType &type, uint32_t index) const
+{
+	return has_extended_member_decoration(type.self, index, SPIRVCrossDecorationPhysicalTypePacked);
+}
+
+bool CompilerMSL::is_stage_output_builtin_masked(spv::BuiltIn builtin) const
+{
+	return masked_output_builtins.count(builtin) != 0;
+}
+
+string CompilerMSL::to_array_size(const SPIRType &type, uint32_t index)
+{
+	assert(type.array.size() == type.array_size_literal.size());
+
+	auto &size = type.array[index];
+	if (!type.array_size_literal[index])
+		return to_expression(size);
+	else if (size)
+		return convert_to_string(size);
+	else if (!backend.unsized_array_supported)
+	{
+		// For runtime-sized arrays, we can work around
+		// lack of standard support for this by simply having
+		// a single element array.
+		//
+		// Runtime length arrays must always be the last element
+		// in an interface block.
+		return "1";
+	}
+	else
+		return "";
+}
+
+string CompilerMSL::to_rerolled_array_expression(const SPIRType &parent_type,
+                                                  const string &base_expr, const SPIRType &type)
+{
+	bool remapped_boolean = parent_type.basetype == SPIRType::Struct &&
+	                        type.basetype == SPIRType::Boolean &&
+	                        backend.boolean_in_struct_remapped_type != SPIRType::Boolean;
+
+	SPIRType tmp_type;
+	if (remapped_boolean)
+	{
+		tmp_type = get<SPIRType>(type.parent_type);
+		tmp_type.basetype = backend.boolean_in_struct_remapped_type;
+	}
+	else if (type.basetype == SPIRType::Boolean && backend.boolean_in_struct_remapped_type != SPIRType::Boolean)
+	{
+		// It's possible that we have an r-value expression that was OpLoaded from a struct.
+		// We have to reroll this and explicitly cast the input to bool, because the r-value is short.
+		tmp_type = get<SPIRType>(type.parent_type);
+		remapped_boolean = true;
+	}
+
+	uint32_t size = to_array_size_literal(type);
+	auto &parent = get<SPIRType>(type.parent_type);
+	string expr = "{ ";
+
+	for (uint32_t i = 0; i < size; i++)
+	{
+		auto subexpr = join(base_expr, "[", convert_to_string(i), "]");
+		if (!type_is_top_level_array(parent))
+		{
+			if (remapped_boolean)
+				subexpr = join(type_to_glsl(tmp_type), "(", subexpr, ")");
+			expr += subexpr;
+		}
+		else
+			expr += to_rerolled_array_expression(parent_type, subexpr, parent);
+
+		if (i + 1 < size)
+			expr += ", ";
+	}
+
+	expr += " }";
+	return expr;
+}
+
+void CompilerMSL::add_variable(unordered_set<string> &variables_primary,
+                                const unordered_set<string> &variables_secondary, string &name)
+{
+	if (name.empty())
+		return;
+
+	ParsedIR::sanitize_underscores(name);
+	if (ParsedIR::is_globally_reserved_identifier(name, true))
+	{
+		name.clear();
+		return;
+	}
+
+	update_name_cache(variables_primary, variables_secondary, name);
+}
+
+void CompilerMSL::reset_name_caches()
+{
+	for (auto &preserved : preserved_aliases)
+		set_name(preserved.first, preserved.second);
+
+	preserved_aliases.clear();
+	resource_names.clear();
+	block_input_names.clear();
+	block_output_names.clear();
+	block_ubo_names.clear();
+	block_ssbo_names.clear();
+	block_names.clear();
+	function_overloads.clear();
+}
+
+void CompilerMSL::emit_line_directive(uint32_t file_id, uint32_t line_literal)
+{
+	// If we are redirecting statements, ignore the line directive.
+	// Common case here is continue blocks.
+	if (redirect_statement)
+		return;
+
+	// If we're emitting code in a sensitive context such as condition blocks in for loops, don't emit
+	// any line directives, because it's not possible.
+	if (block_debug_directives)
+		return;
+
+	if (options.emit_line_directives)
+	{
+		require_extension_internal("GL_GOOGLE_cpp_style_line_directive");
+		statement_no_indent("#line ", line_literal, " \"", get<SPIRString>(file_id).str, "\"");
+	}
+}
+
+string CompilerMSL::variable_decl_function_local(SPIRVariable &var)
+{
+	// These variables are always function local,
+	// so make sure we emit the variable without storage qualifiers.
+	// Some backends will inject custom variables locally in a function
+	// with a storage qualifier which is not function-local.
+	auto old_storage = var.storage;
+	var.storage = StorageClassFunction;
+	auto expr = variable_decl(var);
+	var.storage = old_storage;
+	return expr;
+}
+
+void CompilerMSL::emit_block_chain(SPIRBlock &block)
+{
+	bool select_branch_to_true_block = false;
+	bool select_branch_to_false_block = false;
+	bool skip_direct_branch = false;
+	bool emitted_loop_header_variables = false;
+	bool force_complex_continue_block = false;
+	ValueSaver<uint32_t> loop_level_saver(current_loop_level);
+
+	if (block.merge == SPIRBlock::MergeLoop)
+		add_loop_level();
+
+	// If we're emitting PHI variables with precision aliases, we have to emit them as hoisted temporaries.
+	for (auto var_id : block.dominated_variables)
+	{
+		auto &var = get<SPIRVariable>(var_id);
+		if (var.phi_variable)
+		{
+			auto mirrored_precision_itr = temporary_to_mirror_precision_alias.find(var_id);
+			if (mirrored_precision_itr != temporary_to_mirror_precision_alias.end() &&
+			    find_if(block.declare_temporary.begin(), block.declare_temporary.end(),
+			            [mirrored_precision_itr](const std::pair<TypeID, VariableID> &p) {
+			              return p.second == mirrored_precision_itr->second;
+			            }) == block.declare_temporary.end())
+			{
+				block.declare_temporary.push_back({ var.basetype, mirrored_precision_itr->second });
+			}
+		}
+	}
+
+	emit_hoisted_temporaries(block.declare_temporary);
+
+	SPIRBlock::ContinueBlockType continue_type = SPIRBlock::ContinueNone;
+	if (block.continue_block)
+	{
+		continue_type = continue_block_type(get<SPIRBlock>(block.continue_block));
+		// If we know we cannot emit a loop, mark the block early as a complex loop so we don't force unnecessary recompiles.
+		if (continue_type == SPIRBlock::ComplexLoop)
+			block.complex_continue = true;
+	}
+
+	// If we have loop variables, stop masking out access to the variable now.
+	for (auto var_id : block.loop_variables)
+	{
+		auto &var = get<SPIRVariable>(var_id);
+		var.loop_variable_enable = true;
+		// We're not going to declare the variable directly, so emit a copy here.
+		emit_variable_temporary_copies(var);
+	}
+
+	// Remember deferred declaration state. We will restore it before returning.
+	SmallVector<bool, 64> rearm_dominated_variables(block.dominated_variables.size());
+	for (size_t i = 0; i < block.dominated_variables.size(); i++)
+	{
+		uint32_t var_id = block.dominated_variables[i];
+		auto &var = get<SPIRVariable>(var_id);
+		rearm_dominated_variables[i] = var.deferred_declaration;
+	}
+
+	// This is the method often used by spirv-opt to implement loops.
+	// The loop header goes straight into the continue block.
+	// However, don't attempt this on ESSL 1.0, because if a loop variable is used in a continue block,
+	// it *MUST* be used in the continue block. This loop method will not work.
+	if (!is_legacy_es() && block_is_loop_candidate(block, SPIRBlock::MergeToSelectContinueForLoop))
+	{
+		flush_undeclared_variables(block);
+		if (attempt_emit_loop_header(block, SPIRBlock::MergeToSelectContinueForLoop))
+		{
+			if (execution_is_noop(get<SPIRBlock>(block.true_block), get<SPIRBlock>(block.merge_block)))
+				select_branch_to_false_block = true;
+			else
+				select_branch_to_true_block = true;
+
+			emitted_loop_header_variables = true;
+			force_complex_continue_block = true;
+		}
+	}
+	// This is the older loop behavior in glslang which branches to loop body directly from the loop header.
+	else if (block_is_loop_candidate(block, SPIRBlock::MergeToSelectForLoop))
+	{
+		flush_undeclared_variables(block);
+		if (attempt_emit_loop_header(block, SPIRBlock::MergeToSelectForLoop))
+		{
+			// The body of while, is actually just the true (or false) block, so always branch there unconditionally.
+			if (execution_is_noop(get<SPIRBlock>(block.true_block), get<SPIRBlock>(block.merge_block)))
+				select_branch_to_false_block = true;
+			else
+				select_branch_to_true_block = true;
+
+			emitted_loop_header_variables = true;
+		}
+	}
+	// This is the newer loop behavior in glslang which branches from Loop header directly to
+	// a new block, which in turn has a OpBranchSelection without a selection merge.
+	else if (block_is_loop_candidate(block, SPIRBlock::MergeToDirectForLoop))
+	{
+		flush_undeclared_variables(block);
+		if (attempt_emit_loop_header(block, SPIRBlock::MergeToDirectForLoop))
+		{
+			skip_direct_branch = true;
+			emitted_loop_header_variables = true;
+		}
+	}
+	else if (continue_type == SPIRBlock::DoWhileLoop)
+	{
+		flush_undeclared_variables(block);
+		emit_while_loop_initializers(block);
+		emitted_loop_header_variables = true;
+		// We have some temporaries where the loop header is the dominator.
+		// We risk a case where we have code like:
+		// for (;;) { create-temporary; break; } consume-temporary;
+		// so force-declare temporaries here.
+		emit_hoisted_temporaries(block.potential_declare_temporary);
+		statement("do");
+		begin_scope();
+
+		emit_block_instructions(block);
+	}
+	else if (block.merge == SPIRBlock::MergeLoop)
+	{
+		flush_undeclared_variables(block);
+		emit_while_loop_initializers(block);
+		emitted_loop_header_variables = true;
+
+		// We have a generic loop without any distinguishable pattern like for, while or do while.
+		get<SPIRBlock>(block.continue_block).complex_continue = true;
+		continue_type = SPIRBlock::ComplexLoop;
+
+		// We have some temporaries where the loop header is the dominator.
+		// We risk a case where we have code like:
+		// for (;;) { create-temporary; break; } consume-temporary;
+		// so force-declare temporaries here.
+		emit_hoisted_temporaries(block.potential_declare_temporary);
+		emit_block_hints(block);
+		statement("for (;;)");
+		begin_scope();
+
+		emit_block_instructions(block);
+	}
+	else
+	{
+		emit_block_instructions(block);
+	}
+
+	// If we didn't successfully emit a loop header and we had loop variable candidates, we have a problem
+	// as writes to said loop variables might have been masked out, we need a recompile.
+	if (!emitted_loop_header_variables && !block.loop_variables.empty())
+	{
+		force_recompile_guarantee_forward_progress();
+		for (auto var : block.loop_variables)
+			get<SPIRVariable>(var).loop_variable = false;
+		block.loop_variables.clear();
+	}
+
+	flush_undeclared_variables(block);
+	bool emit_next_block = true;
+
+	// Handle end of block.
+	switch (block.terminator)
+	{
+	case SPIRBlock::Direct:
+		// True when emitting complex continue block.
+		if (block.loop_dominator == block.next_block)
+		{
+			branch(block.self, block.next_block);
+			emit_next_block = false;
+		}
+		// True if MergeToDirectForLoop succeeded.
+		else if (skip_direct_branch)
+			emit_next_block = false;
+		else if (is_continue(block.next_block) || is_break(block.next_block) || is_conditional(block.next_block))
+		{
+			branch(block.self, block.next_block);
+			emit_next_block = false;
+		}
+		break;
+
+	case SPIRBlock::Select:
+		// True if MergeToSelectForLoop or MergeToSelectContinueForLoop succeeded.
+		if (select_branch_to_true_block)
+		{
+			if (force_complex_continue_block)
+			{
+				assert(block.true_block == block.continue_block);
+
+				// We're going to emit a continue block directly here, so make sure it's marked as complex.
+				auto &complex_continue = get<SPIRBlock>(block.continue_block).complex_continue;
+				bool old_complex = complex_continue;
+				complex_continue = true;
+				branch(block.self, block.true_block);
+				complex_continue = old_complex;
+			}
+			else
+				branch(block.self, block.true_block);
+		}
+		else if (select_branch_to_false_block)
+		{
+			if (force_complex_continue_block)
+			{
+				assert(block.false_block == block.continue_block);
+
+				// We're going to emit a continue block directly here, so make sure it's marked as complex.
+				auto &complex_continue = get<SPIRBlock>(block.continue_block).complex_continue;
+				bool old_complex = complex_continue;
+				complex_continue = true;
+				branch(block.self, block.false_block);
+				complex_continue = old_complex;
+			}
+			else
+				branch(block.self, block.false_block);
+		}
+		else
+			branch(block.self, block.condition, block.true_block, block.false_block);
+		break;
+
+	case SPIRBlock::MultiSelect:
+	{
+		auto &type = expression_type(block.condition);
+		bool unsigned_case = type.basetype == SPIRType::UInt || type.basetype == SPIRType::UShort ||
+		                     type.basetype == SPIRType::UByte || type.basetype == SPIRType::UInt64;
+
+		if (block.merge == SPIRBlock::MergeNone)
+			SPIRV_CROSS_THROW("Switch statement is not structured");
+
+		if (!backend.support_64bit_switch && (type.basetype == SPIRType::UInt64 || type.basetype == SPIRType::Int64))
+		{
+			// SPIR-V spec suggests this is allowed, but we cannot support it in higher level languages.
+			SPIRV_CROSS_THROW("Cannot use 64-bit switch selectors.");
+		}
+
+		const char *label_suffix = "";
+		if (type.basetype == SPIRType::UInt && backend.uint32_t_literal_suffix)
+			label_suffix = "u";
+		else if (type.basetype == SPIRType::Int64 && backend.support_64bit_switch)
+			label_suffix = "l";
+		else if (type.basetype == SPIRType::UInt64 && backend.support_64bit_switch)
+			label_suffix = "ul";
+		else if (type.basetype == SPIRType::UShort)
+			label_suffix = backend.uint16_t_literal_suffix;
+		else if (type.basetype == SPIRType::Short)
+			label_suffix = backend.int16_t_literal_suffix;
+
+		current_emitting_switch_stack.push_back(&block);
+
+		if (block.need_ladder_break)
+			statement("bool _", block.self, "_ladder_break = false;");
+
+		// Find all unique case constructs.
+		unordered_map<uint32_t, SmallVector<uint64_t>> case_constructs;
+		SmallVector<uint32_t> block_declaration_order;
+		SmallVector<uint64_t> literals_to_merge;
+
+		// If a switch case branches to the default block for some reason, we can just remove that literal from consideration
+		// and let the default: block handle it.
+		// 2.11 in SPIR-V spec states that for fall-through cases, there is a very strict declaration order which we can take advantage of here.
+		// We only need to consider possible fallthrough if order[i] branches to order[i + 1].
+		auto &cases = get_case_list(block);
+		for (auto &c : cases)
+		{
+			if (c.block != block.next_block && c.block != block.default_block)
+			{
+				if (!case_constructs.count(c.block))
+					block_declaration_order.push_back(c.block);
+				case_constructs[c.block].push_back(c.value);
+			}
+			else if (c.block == block.next_block && block.default_block != block.next_block)
+			{
+				// We might have to flush phi inside specific case labels.
+				// If we can piggyback on default:, do so instead.
+				literals_to_merge.push_back(c.value);
+			}
+		}
+
+		// Empty literal array -> default.
+		if (block.default_block != block.next_block)
+		{
+			auto &default_block = get<SPIRBlock>(block.default_block);
+
+			// We need to slide in the default block somewhere in this chain
+			// if there are fall-through scenarios since the default is declared separately in OpSwitch.
+			// Only consider trivial fall-through cases here.
+			size_t num_blocks = block_declaration_order.size();
+			bool injected_block = false;
+
+			for (size_t i = 0; i < num_blocks; i++)
+			{
+				auto &case_block = get<SPIRBlock>(block_declaration_order[i]);
+				if (execution_is_direct_branch(case_block, default_block))
+				{
+					// Fallthrough to default block, we must inject the default block here.
+					block_declaration_order.insert(begin(block_declaration_order) + i + 1, block.default_block);
+					injected_block = true;
+					break;
+				}
+				else if (execution_is_direct_branch(default_block, case_block))
+				{
+					// Default case is falling through to another case label, we must inject the default block here.
+					block_declaration_order.insert(begin(block_declaration_order) + i, block.default_block);
+					injected_block = true;
+					break;
+				}
+			}
+
+			// Order does not matter.
+			if (!injected_block)
+				block_declaration_order.push_back(block.default_block);
+			else if (is_legacy_es())
+				SPIRV_CROSS_THROW("Default case label fallthrough to other case label is not supported in ESSL 1.0.");
+
+			case_constructs[block.default_block] = {};
+		}
+
+		size_t num_blocks = block_declaration_order.size();
+
+		const auto to_case_label = [](uint64_t literal, uint32_t width, bool is_unsigned_case) -> string
+		{
+			if (is_unsigned_case)
+				return convert_to_string(literal);
+
+			// For smaller cases, the literals are compiled as 32 bit wide
+			// literals so we don't need to care for all sizes specifically.
+			if (width <= 32)
+			{
+				return convert_to_string(int64_t(int32_t(literal)));
+			}
+
+			return convert_to_string(int64_t(literal));
+		};
+
+		const auto to_legacy_case_label = [&](uint32_t condition, const SmallVector<uint64_t> &labels,
+		                                      const char *suffix) -> string {
+			string ret;
+			size_t count = labels.size();
+			for (size_t i = 0; i < count; i++)
+			{
+				if (i)
+					ret += " || ";
+				ret += join(count > 1 ? "(" : "", to_enclosed_expression(condition), " == ", labels[i], suffix,
+				            count > 1 ? ")" : "");
+			}
+			return ret;
+		};
+
+		// We need to deal with a complex scenario for OpPhi. If we have case-fallthrough and Phi in the picture,
+		// we need to flush phi nodes outside the switch block in a branch,
+		// and skip any Phi handling inside the case label to make fall-through work as expected.
+		// This kind of code-gen is super awkward and it's a last resort. Normally we would want to handle this
+		// inside the case label if at all possible.
+		for (size_t i = 1; backend.support_case_fallthrough && i < num_blocks; i++)
+		{
+			if (flush_phi_required(block.self, block_declaration_order[i]) &&
+			    flush_phi_required(block_declaration_order[i - 1], block_declaration_order[i]))
+			{
+				uint32_t target_block = block_declaration_order[i];
+
+				// Make sure we flush Phi, it might have been marked to be ignored earlier.
+				get<SPIRBlock>(target_block).ignore_phi_from_block = 0;
+
+				auto &literals = case_constructs[target_block];
+
+				if (literals.empty())
+				{
+					// Oh boy, gotta make a complete negative test instead! o.o
+					// Find all possible literals that would *not* make us enter the default block.
+					// If none of those literals match, we flush Phi ...
+					SmallVector<string> conditions;
+					for (size_t j = 0; j < num_blocks; j++)
+					{
+						auto &negative_literals = case_constructs[block_declaration_order[j]];
+						for (auto &case_label : negative_literals)
+							conditions.push_back(join(to_enclosed_expression(block.condition),
+							                          " != ", to_case_label(case_label, type.width, unsigned_case)));
+					}
+
+					statement("if (", merge(conditions, " && "), ")");
+					begin_scope();
+					flush_phi(block.self, target_block);
+					end_scope();
+				}
+				else
+				{
+					SmallVector<string> conditions;
+					conditions.reserve(literals.size());
+					for (auto &case_label : literals)
+						conditions.push_back(join(to_enclosed_expression(block.condition),
+						                          " == ", to_case_label(case_label, type.width, unsigned_case)));
+					statement("if (", merge(conditions, " || "), ")");
+					begin_scope();
+					flush_phi(block.self, target_block);
+					end_scope();
+				}
+
+				// Mark the block so that we don't flush Phi from header to case label.
+				get<SPIRBlock>(target_block).ignore_phi_from_block = block.self;
+			}
+		}
+
+		// If there is only one default block, and no cases, this is a case where SPIRV-opt decided to emulate
+		// non-structured exits with the help of a switch block.
+		// This is buggy on FXC, so just emit the logical equivalent of a do { } while(false), which is more idiomatic.
+		bool block_like_switch = cases.empty();
+
+		// If this is true, the switch is completely meaningless, and we should just avoid it.
+		bool collapsed_switch = block_like_switch && block.default_block == block.next_block;
+
+		if (!collapsed_switch)
+		{
+			if (block_like_switch || is_legacy_es())
+			{
+				// ESSL 1.0 is not guaranteed to support do/while.
+				if (is_legacy_es())
+				{
+					uint32_t counter = statement_count;
+					statement("for (int spvDummy", counter, " = 0; spvDummy", counter, " < 1; spvDummy", counter,
+					          "++)");
+				}
+				else
+					statement("do");
+			}
+			else
+			{
+				emit_block_hints(block);
+				statement("switch (", to_unpacked_expression(block.condition), ")");
+			}
+			begin_scope();
+		}
+
+		for (size_t i = 0; i < num_blocks; i++)
+		{
+			uint32_t target_block = block_declaration_order[i];
+			auto &literals = case_constructs[target_block];
+
+			if (literals.empty())
+			{
+				// Default case.
+				if (!block_like_switch)
+				{
+					if (is_legacy_es())
+						statement("else");
+					else
+						statement("default:");
+				}
+			}
+			else
+			{
+				if (is_legacy_es())
+				{
+					statement((i ? "else " : ""), "if (", to_legacy_case_label(block.condition, literals, label_suffix),
+					          ")");
+				}
+				else
+				{
+					for (auto &case_literal : literals)
+					{
+						// The case label value must be sign-extended properly in SPIR-V, so we can assume 32-bit values here.
+						statement("case ", to_case_label(case_literal, type.width, unsigned_case), label_suffix, ":");
+					}
+				}
+			}
+
+			auto &case_block = get<SPIRBlock>(target_block);
+			if (backend.support_case_fallthrough && i + 1 < num_blocks &&
+			    execution_is_direct_branch(case_block, get<SPIRBlock>(block_declaration_order[i + 1])))
+			{
+				// We will fall through here, so just terminate the block chain early.
+				// We still need to deal with Phi potentially.
+				// No need for a stack-like thing here since we only do fall-through when there is a
+				// single trivial branch to fall-through target..
+				current_emitting_switch_fallthrough = true;
+			}
+			else
+				current_emitting_switch_fallthrough = false;
+
+			if (!block_like_switch)
+				begin_scope();
+			branch(block.self, target_block);
+			if (!block_like_switch)
+				end_scope();
+
+			current_emitting_switch_fallthrough = false;
+		}
+
+		// Might still have to flush phi variables if we branch from loop header directly to merge target.
+		// This is supposed to emit all cases where we branch from header to merge block directly.
+		// There are two main scenarios where cannot rely on default fallthrough.
+		// - There is an explicit default: label already.
+		//   In this case, literals_to_merge need to form their own "default" case, so that we avoid executing that block.
+		// - Header -> Merge requires flushing PHI. In this case, we need to collect all cases and flush PHI there.
+		bool header_merge_requires_phi = flush_phi_required(block.self, block.next_block);
+		bool need_fallthrough_block = block.default_block == block.next_block || !literals_to_merge.empty();
+		if (!collapsed_switch && ((header_merge_requires_phi && need_fallthrough_block) || !literals_to_merge.empty()))
+		{
+			for (auto &case_literal : literals_to_merge)
+				statement("case ", to_case_label(case_literal, type.width, unsigned_case), label_suffix, ":");
+
+			if (block.default_block == block.next_block)
+			{
+				if (is_legacy_es())
+					statement("else");
+				else
+					statement("default:");
+			}
+
+			begin_scope();
+			flush_phi(block.self, block.next_block);
+			statement("break;");
+			end_scope();
+		}
+
+		if (!collapsed_switch)
+		{
+			if (block_like_switch && !is_legacy_es())
+				end_scope_decl("while(false)");
+			else
+				end_scope();
+		}
+		else
+			flush_phi(block.self, block.next_block);
+
+		if (block.need_ladder_break)
+		{
+			statement("if (_", block.self, "_ladder_break)");
+			begin_scope();
+			statement("break;");
+			end_scope();
+		}
+
+		current_emitting_switch_stack.pop_back();
+		break;
+	}
+
+	case SPIRBlock::Return:
+	{
+		for (auto &line : current_function->fixup_hooks_out)
+			line();
+
+		if (processing_entry_point)
+			emit_fixup();
+
+		auto &cfg = get_cfg_for_current_function();
+
+		if (block.return_value)
+		{
+			auto &type = expression_type(block.return_value);
+			if (!type.array.empty() && !backend.can_return_array)
+			{
+				// If we cannot return arrays, we will have a special out argument we can write to instead.
+				// The backend is responsible for setting this up, and redirection the return values as appropriate.
+				if (ir.ids[block.return_value].get_type() != TypeUndef)
+				{
+					emit_array_copy("spvReturnValue", 0, block.return_value, StorageClassFunction,
+					                get_expression_effective_storage_class(block.return_value));
+				}
+
+				if (!cfg.node_terminates_control_flow_in_sub_graph(current_function->entry_block, block.self) ||
+				    block.loop_dominator != BlockID(SPIRBlock::NoDominator))
+				{
+					statement("return;");
+				}
+			}
+			else
+			{
+				// OpReturnValue can return Undef, so don't emit anything for this case.
+				if (ir.ids[block.return_value].get_type() != TypeUndef)
+					statement("return ", to_unpacked_expression(block.return_value), ";");
+			}
+		}
+		else if (!cfg.node_terminates_control_flow_in_sub_graph(current_function->entry_block, block.self) ||
+		         block.loop_dominator != BlockID(SPIRBlock::NoDominator))
+		{
+			// If this block is the very final block and not called from control flow,
+			// we do not need an explicit return which looks out of place. Just end the function here.
+			// In the very weird case of for(;;) { return; } executing return is unconditional,
+			// but we actually need a return here ...
+			statement("return;");
+		}
+		break;
+	}
+
+	// If the Kill is terminating a block with a (probably synthetic) return value, emit a return value statement.
+	case SPIRBlock::Kill:
+		statement(backend.discard_literal, ";");
+		if (block.return_value)
+			statement("return ", to_unpacked_expression(block.return_value), ";");
+		break;
+
+	case SPIRBlock::Unreachable:
+	{
+		// Avoid emitting false fallthrough, which can happen for
+		// if (cond) break; else discard; inside a case label.
+		// Discard is not always implementable as a terminator.
+
+		auto &cfg = get_cfg_for_current_function();
+		bool inner_dominator_is_switch = false;
+		ID id = block.self;
+
+		while (id)
+		{
+			auto &iter_block = get<SPIRBlock>(id);
+			if (iter_block.terminator == SPIRBlock::MultiSelect ||
+			    iter_block.merge == SPIRBlock::MergeLoop)
+			{
+				ID next_block = iter_block.merge == SPIRBlock::MergeLoop ?
+				                iter_block.merge_block : iter_block.next_block;
+				bool outside_construct = next_block && cfg.find_common_dominator(next_block, block.self) == next_block;
+				if (!outside_construct)
+				{
+					inner_dominator_is_switch = iter_block.terminator == SPIRBlock::MultiSelect;
+					break;
+				}
+			}
+
+			if (cfg.get_preceding_edges(id).empty())
+				break;
+
+			id = cfg.get_immediate_dominator(id);
+		}
+
+		if (inner_dominator_is_switch)
+			statement("break; // unreachable workaround");
+
+		emit_next_block = false;
+		break;
+	}
+
+	case SPIRBlock::IgnoreIntersection:
+		statement("ignoreIntersectionEXT;");
+		break;
+
+	case SPIRBlock::TerminateRay:
+		statement("terminateRayEXT;");
+		break;
+
+	case SPIRBlock::EmitMeshTasks:
+		emit_mesh_tasks(block);
+		break;
+
+	default:
+		SPIRV_CROSS_THROW("Unimplemented block terminator.");
+	}
+
+	if (block.next_block && emit_next_block)
+	{
+		// If we hit this case, we're dealing with an unconditional branch, which means we will output
+		// that block after this. If we had selection merge, we already flushed phi variables.
+		if (block.merge != SPIRBlock::MergeSelection)
+		{
+			flush_phi(block.self, block.next_block);
+			// For a direct branch, need to remember to invalidate expressions in the next linear block instead.
+			get<SPIRBlock>(block.next_block).invalidate_expressions = block.invalidate_expressions;
+		}
+
+		// For switch fallthrough cases, we terminate the chain here, but we still need to handle Phi.
+		if (!current_emitting_switch_fallthrough)
+		{
+			// For merge selects we might have ignored the fact that a merge target
+			// could have been a break; or continue;
+			// We will need to deal with it here.
+			if (is_loop_break(block.next_block))
+			{
+				// Cannot check for just break, because switch statements will also use break.
+				assert(block.merge == SPIRBlock::MergeSelection);
+				statement("break;");
+			}
+			else if (is_continue(block.next_block))
+			{
+				assert(block.merge == SPIRBlock::MergeSelection);
+				branch_to_continue(block.self, block.next_block);
+			}
+			else if (BlockID(block.self) != block.next_block)
+				emit_block_chain(get<SPIRBlock>(block.next_block));
+		}
+	}
+
+	if (block.merge == SPIRBlock::MergeLoop)
+	{
+		if (continue_type == SPIRBlock::DoWhileLoop)
+		{
+			// Make sure that we run the continue block to get the expressions set, but this
+			// should become an empty string.
+			// We have no fallbacks if we cannot forward everything to temporaries ...
+			const auto &continue_block = get<SPIRBlock>(block.continue_block);
+			bool positive_test = execution_is_noop(get<SPIRBlock>(continue_block.true_block),
+			                                       get<SPIRBlock>(continue_block.loop_dominator));
+
+			uint32_t current_count = statement_count;
+			auto statements = emit_continue_block(block.continue_block, positive_test, !positive_test);
+			if (statement_count != current_count)
+			{
+				// The DoWhile block has side effects, force ComplexLoop pattern next pass.
+				get<SPIRBlock>(block.continue_block).complex_continue = true;
+				force_recompile();
+			}
+
+			// Might have to invert the do-while test here.
+			auto condition = to_expression(continue_block.condition);
+			if (!positive_test)
+				condition = join("!", enclose_expression(condition));
+
+			end_scope_decl(join("while (", condition, ")"));
+		}
+		else
+			end_scope();
+
+		loop_level_saver.release();
+
+		// We cannot break out of two loops at once, so don't check for break; here.
+		// Using block.self as the "from" block isn't quite right, but it has the same scope
+		// and dominance structure, so it's fine.
+		if (is_continue(block.merge_block))
+			branch_to_continue(block.self, block.merge_block);
+		else
+			emit_block_chain(get<SPIRBlock>(block.merge_block));
+	}
+
+	// Forget about control dependent expressions now.
+	block.invalidate_expressions.clear();
+
+	// After we return, we must be out of scope, so if we somehow have to re-emit this function,
+	// re-declare variables if necessary.
+	assert(rearm_dominated_variables.size() == block.dominated_variables.size());
+	for (size_t i = 0; i < block.dominated_variables.size(); i++)
+	{
+		uint32_t var = block.dominated_variables[i];
+		get<SPIRVariable>(var).deferred_declaration = rearm_dominated_variables[i];
+	}
+
+	// Just like for deferred declaration, we need to forget about loop variable enable
+	// if our block chain is reinstantiated later.
+	for (auto &var_id : block.loop_variables)
+		get<SPIRVariable>(var_id).loop_variable_enable = false;
+}
+
+// FIXME: This currently cannot handle complex continue blocks
+// as in do-while.
+// This should be seen as a "trivial" continue block.
+string CompilerMSL::emit_continue_block(uint32_t continue_block, bool follow_true_block, bool follow_false_block)
+{
+	auto *block = &get<SPIRBlock>(continue_block);
+
+	// While emitting the continue block, declare_temporary will check this
+	// if we have to emit temporaries.
+	current_continue_block = block;
+
+	SmallVector<string> statements;
+
+	// Capture all statements into our list.
+	auto *old = redirect_statement;
+	redirect_statement = &statements;
+
+	// Stamp out all blocks one after each other.
+	while ((ir.block_meta[block->self] & ParsedIR::BLOCK_META_LOOP_HEADER_BIT) == 0)
+	{
+		// Write out all instructions we have in this block.
+		emit_block_instructions(*block);
+
+		// For plain branchless for/while continue blocks.
+		if (block->next_block)
+		{
+			flush_phi(continue_block, block->next_block);
+			block = &get<SPIRBlock>(block->next_block);
+		}
+		// For do while blocks. The last block will be a select block.
+		else if (block->true_block && follow_true_block)
+		{
+			flush_phi(continue_block, block->true_block);
+			block = &get<SPIRBlock>(block->true_block);
+		}
+		else if (block->false_block && follow_false_block)
+		{
+			flush_phi(continue_block, block->false_block);
+			block = &get<SPIRBlock>(block->false_block);
+		}
+		else
+		{
+			SPIRV_CROSS_THROW("Invalid continue block detected!");
+		}
+	}
+
+	// Restore old pointer.
+	redirect_statement = old;
+
+	// Somewhat ugly, strip off the last ';' since we use ',' instead.
+	// Ideally, we should select this behavior in statement().
+	for (auto &s : statements)
+	{
+		if (!s.empty() && s.back() == ';')
+			s.erase(s.size() - 1, 1);
+	}
+
+	current_continue_block = nullptr;
+	return merge(statements);
+}
+
+bool CompilerMSL::is_stage_output_location_masked(uint32_t location, uint32_t component) const
+{
+	return masked_output_locations.count({ location, component }) != 0;
+}
+
+bool CompilerMSL::remove_duplicate_swizzle(string &op)
+{
+	auto pos = op.find_last_of('.');
+	if (pos == string::npos || pos == 0)
+		return false;
+
+	string final_swiz = op.substr(pos + 1, string::npos);
+
+	if (backend.swizzle_is_function)
+	{
+		if (final_swiz.size() < 2)
+			return false;
+
+		if (final_swiz.substr(final_swiz.size() - 2, string::npos) == "()")
+			final_swiz.erase(final_swiz.size() - 2, string::npos);
+		else
+			return false;
+	}
+
+	// Check if final swizzle is of form .x, .xy, .xyz, .xyzw or similar.
+	// If so, and previous swizzle is of same length,
+	// we can drop the final swizzle altogether.
+	for (uint32_t i = 0; i < final_swiz.size(); i++)
+	{
+		static const char expected[] = { 'x', 'y', 'z', 'w' };
+		if (i >= 4 || final_swiz[i] != expected[i])
+			return false;
+	}
+
+	auto prevpos = op.find_last_of('.', pos - 1);
+	if (prevpos == string::npos)
+		return false;
+
+	prevpos++;
+
+	// Make sure there are only swizzles here ...
+	for (auto i = prevpos; i < pos; i++)
+	{
+		if (op[i] < 'w' || op[i] > 'z')
+		{
+			// If swizzles are foo.xyz() like in C++ backend for example, check for that.
+			if (backend.swizzle_is_function && i + 2 == pos && op[i] == '(' && op[i + 1] == ')')
+				break;
+			return false;
+		}
+	}
+
+	// If original swizzle is large enough, just carve out the components we need.
+	// E.g. foobar.wyx.xy will turn into foobar.wy.
+	if (pos - prevpos >= final_swiz.size())
+	{
+		op.erase(prevpos + final_swiz.size(), string::npos);
+
+		// Add back the function call ...
+		if (backend.swizzle_is_function)
+			op += "()";
+	}
+	return true;
+}
+
+void CompilerMSL::emit_hoisted_temporaries(SmallVector<pair<TypeID, ID>> &temporaries)
+{
+	// If we need to force temporaries for certain IDs due to continue blocks, do it before starting loop header.
+	// Need to sort these to ensure that reference output is stable.
+	sort(begin(temporaries), end(temporaries),
+	     [](const pair<TypeID, ID> &a, const pair<TypeID, ID> &b) { return a.second < b.second; });
+
+	for (auto &tmp : temporaries)
+	{
+		auto &type = get<SPIRType>(tmp.first);
+
+		// There are some rare scenarios where we are asked to declare pointer types as hoisted temporaries.
+		// This should be ignored unless we're doing actual variable pointers and backend supports it.
+		// Access chains cannot normally be lowered to temporaries in GLSL and HLSL.
+		if (type.pointer && !backend.native_pointers)
+			continue;
+
+		add_local_variable_name(tmp.second);
+		auto &flags = get_decoration_bitset(tmp.second);
+
+		// Not all targets support pointer literals, so don't bother with that case.
+		string initializer;
+		if (options.force_zero_initialized_variables && type_can_zero_initialize(type))
+			initializer = join(" = ", to_zero_initialized_expression(tmp.first));
+
+		statement(flags_to_qualifiers_glsl(type, flags), variable_decl(type, to_name(tmp.second)), initializer, ";");
+
+		hoisted_temporaries.insert(tmp.second);
+		forced_temporaries.insert(tmp.second);
+
+		// The temporary might be read from before it's assigned, set up the expression now.
+		set<SPIRExpression>(tmp.second, to_name(tmp.second), tmp.first, true);
+
+		// If we have hoisted temporaries in multi-precision contexts, emit that here too ...
+		// We will not be able to analyze hoisted-ness for dependent temporaries that we hallucinate here.
+		auto mirrored_precision_itr = temporary_to_mirror_precision_alias.find(tmp.second);
+		if (mirrored_precision_itr != temporary_to_mirror_precision_alias.end())
+		{
+			uint32_t mirror_id = mirrored_precision_itr->second;
+			auto &mirror_flags = get_decoration_bitset(mirror_id);
+			statement(flags_to_qualifiers_glsl(type, mirror_flags),
+			          variable_decl(type, to_name(mirror_id)),
+			          initializer, ";");
+			// The temporary might be read from before it's assigned, set up the expression now.
+			set<SPIRExpression>(mirror_id, to_name(mirror_id), tmp.first, true);
+			hoisted_temporaries.insert(mirror_id);
+		}
+	}
+}
+
+void CompilerMSL::flush_undeclared_variables(SPIRBlock &block)
+{
+	for (auto &v : block.dominated_variables)
+		flush_variable_declaration(v);
+}
+
+void CompilerMSL::emit_while_loop_initializers(const SPIRBlock &block)
+{
+	// While loops do not take initializers, so declare all of them outside.
+	for (auto &loop_var : block.loop_variables)
+	{
+		auto &var = get<SPIRVariable>(loop_var);
+		statement(variable_decl(var), ";");
+	}
+}
+
+void CompilerMSL::emit_block_instructions(SPIRBlock &block)
+{
+	current_emitting_block = &block;
+
+	if (backend.requires_relaxed_precision_analysis)
+	{
+		// If PHI variables are consumed in unexpected precision contexts, copy them here.
+		for (size_t i = 0, n = block.phi_variables.size(); i < n; i++)
+		{
+			auto &phi = block.phi_variables[i];
+
+			// Ensure we only copy once. We know a-priori that this array will lay out
+			// the same function variables together.
+			if (i && block.phi_variables[i - 1].function_variable == phi.function_variable)
+				continue;
+
+			auto itr = temporary_to_mirror_precision_alias.find(phi.function_variable);
+			if (itr != temporary_to_mirror_precision_alias.end())
+			{
+				// Explicitly, we don't want to inherit RelaxedPrecision state in this CopyObject,
+				// so it helps to have handle_instruction_precision() on the outside of emit_instruction().
+				EmbeddedInstruction inst;
+				inst.op = OpCopyObject;
+				inst.length = 3;
+				inst.ops.push_back(expression_type_id(itr->first));
+				inst.ops.push_back(itr->second);
+				inst.ops.push_back(itr->first);
+				emit_instruction(inst);
+			}
+		}
+	}
+
+	for (auto &op : block.ops)
+	{
+		auto temporary_copy = handle_instruction_precision(op);
+		emit_instruction(op);
+		if (temporary_copy.dst_id)
+		{
+			// Explicitly, we don't want to inherit RelaxedPrecision state in this CopyObject,
+			// so it helps to have handle_instruction_precision() on the outside of emit_instruction().
+			EmbeddedInstruction inst;
+			inst.op = OpCopyObject;
+			inst.length = 3;
+			inst.ops.push_back(expression_type_id(temporary_copy.src_id));
+			inst.ops.push_back(temporary_copy.dst_id);
+			inst.ops.push_back(temporary_copy.src_id);
+
+			// Never attempt to hoist mirrored temporaries.
+			// They are hoisted in lock-step with their parents.
+			block_temporary_hoisting = true;
+			emit_instruction(inst);
+			block_temporary_hoisting = false;
+		}
+	}
+
+	current_emitting_block = nullptr;
+}
+
+CompilerMSL::TemporaryCopy CompilerMSL::handle_instruction_precision(const Instruction &instruction)
+{
+	auto ops = stream_mutable(instruction);
+	auto opcode = static_cast<Op>(instruction.op);
+	uint32_t length = instruction.length;
+
+	if (backend.requires_relaxed_precision_analysis)
+	{
+		if (length > 2)
+		{
+			uint32_t forwarding_length = length - 2;
+
+			if (opcode_is_precision_sensitive_operation(opcode))
+				analyze_precision_requirements(ops[0], ops[1], &ops[2], forwarding_length);
+			else if (opcode == OpExtInst && length >= 5 && get<SPIRExtension>(ops[2]).ext == SPIRExtension::GLSL)
+				analyze_precision_requirements(ops[0], ops[1], &ops[4], forwarding_length - 2);
+			else if (opcode_is_precision_forwarding_instruction(opcode, forwarding_length))
+				forward_relaxed_precision(ops[1], &ops[2], forwarding_length);
+		}
+
+		uint32_t result_type = 0, result_id = 0;
+		if (instruction_to_result_type(result_type, result_id, opcode, ops, length))
+		{
+			auto itr = temporary_to_mirror_precision_alias.find(ops[1]);
+			if (itr != temporary_to_mirror_precision_alias.end())
+				return { itr->second, itr->first };
+		}
+	}
+
+	return {};
+}
+
+void CompilerMSL::analyze_precision_requirements(uint32_t type_id, uint32_t dst_id, uint32_t *args, uint32_t length)
+{
+	if (!backend.requires_relaxed_precision_analysis)
+		return;
+
+	auto &type = get<SPIRType>(type_id);
+
+	// RelaxedPrecision only applies to 32-bit values.
+	if (type.basetype != SPIRType::Float && type.basetype != SPIRType::Int && type.basetype != SPIRType::UInt)
+		return;
+
+	bool operation_is_highp = !has_decoration(dst_id, DecorationRelaxedPrecision);
+
+	auto input_precision = analyze_expression_precision(args, length);
+	if (input_precision == GLSLOptions::DontCare)
+	{
+		consume_temporary_in_precision_context(type_id, dst_id, input_precision);
+		return;
+	}
+
+	// In SPIR-V and GLSL, the semantics are flipped for how relaxed precision is determined.
+	// In SPIR-V, the operation itself marks RelaxedPrecision, meaning that inputs can be truncated to 16-bit.
+	// However, if the expression is not, inputs must be expanded to 32-bit first,
+	// since the operation must run at high precision.
+	// This is the awkward part, because if we have mediump inputs, or expressions which derived from mediump,
+	// we might have to forcefully bind the source IDs to highp temporaries. This is done by clearing decorations
+	// and forcing temporaries. Similarly for mediump operations. We bind highp expressions to mediump variables.
+	if ((operation_is_highp && input_precision == GLSLOptions::Mediump) ||
+	    (!operation_is_highp && input_precision == GLSLOptions::Highp))
+	{
+		auto precision = operation_is_highp ? GLSLOptions::Highp : GLSLOptions::Mediump;
+		for (uint32_t i = 0; i < length; i++)
+		{
+			// Rewrites the opcode so that we consume an ID in correct precision context.
+			// This is pretty hacky, but it's the most straight forward way of implementing this without adding
+			// lots of extra passes to rewrite all code blocks.
+			args[i] = consume_temporary_in_precision_context(expression_type_id(args[i]), args[i], precision);
+		}
+	}
+}
+
+CompilerMSL::GLSLOptions::Precision CompilerMSL::analyze_expression_precision(const uint32_t *args, uint32_t length) const
+{
+	// Now, analyze the precision at which the arguments would run.
+	// GLSL rules are such that the precision used to evaluate an expression is equal to the highest precision
+	// for the inputs. Constants do not have inherent precision and do not contribute to this decision.
+	// If all inputs are constants, they inherit precision from outer expressions, including an l-value.
+	// In this case, we'll have to force a temporary for dst_id so that we can bind the constant expression with
+	// correct precision.
+	bool expression_has_highp = false;
+	bool expression_has_mediump = false;
+
+	for (uint32_t i = 0; i < length; i++)
+	{
+		uint32_t arg = args[i];
+
+		auto handle_type = ir.ids[arg].get_type();
+		if (handle_type == TypeConstant || handle_type == TypeConstantOp || handle_type == TypeUndef)
+			continue;
+
+		if (has_decoration(arg, DecorationRelaxedPrecision))
+			expression_has_mediump = true;
+		else
+			expression_has_highp = true;
+	}
+
+	if (expression_has_highp)
+		return GLSLOptions::Highp;
+	else if (expression_has_mediump)
+		return GLSLOptions::Mediump;
+	else
+		return GLSLOptions::DontCare;
+}
+
+uint32_t CompilerMSL::consume_temporary_in_precision_context(uint32_t type_id, uint32_t id, GLSLOptions::Precision precision)
+{
+	// Constants do not have innate precision.
+	auto handle_type = ir.ids[id].get_type();
+	if (handle_type == TypeConstant || handle_type == TypeConstantOp || handle_type == TypeUndef)
+		return id;
+
+	// Ignore anything that isn't 32-bit values.
+	auto &type = get<SPIRType>(type_id);
+	if (type.pointer)
+		return id;
+	if (type.basetype != SPIRType::Float && type.basetype != SPIRType::UInt && type.basetype != SPIRType::Int)
+		return id;
+
+	if (precision == GLSLOptions::DontCare)
+	{
+		// If precision is consumed as don't care (operations only consisting of constants),
+		// we need to bind the expression to a temporary,
+		// otherwise we have no way of controlling the precision later.
+		auto itr = forced_temporaries.insert(id);
+		if (itr.second)
+			force_recompile_guarantee_forward_progress();
+		return id;
+	}
+
+	auto current_precision = has_decoration(id, DecorationRelaxedPrecision) ? GLSLOptions::Mediump : GLSLOptions::Highp;
+	if (current_precision == precision)
+		return id;
+
+	auto itr = temporary_to_mirror_precision_alias.find(id);
+	if (itr == temporary_to_mirror_precision_alias.end())
+	{
+		uint32_t alias_id = ir.increase_bound_by(1);
+		auto &m = ir.meta[alias_id];
+		if (auto *input_m = ir.find_meta(id))
+			m = *input_m;
+
+		const char *prefix;
+		if (precision == GLSLOptions::Mediump)
+		{
+			set_decoration(alias_id, DecorationRelaxedPrecision);
+			prefix = "mp_copy_";
+		}
+		else
+		{
+			unset_decoration(alias_id, DecorationRelaxedPrecision);
+			prefix = "hp_copy_";
+		}
+
+		auto alias_name = join(prefix, to_name(id));
+		ParsedIR::sanitize_underscores(alias_name);
+		set_name(alias_id, alias_name);
+
+		emit_op(type_id, alias_id, to_expression(id), true);
+		temporary_to_mirror_precision_alias[id] = alias_id;
+		forced_temporaries.insert(id);
+		forced_temporaries.insert(alias_id);
+		force_recompile_guarantee_forward_progress();
+		id = alias_id;
+	}
+	else
+	{
+		id = itr->second;
+	}
+
+	return id;
+}
+
+void CompilerMSL::forward_relaxed_precision(uint32_t dst_id, const uint32_t *args, uint32_t length)
+{
+	// Only GLSL supports RelaxedPrecision directly.
+	// We cannot implement this in HLSL or MSL because it is tied to the type system.
+	// In SPIR-V, everything must masquerade as 32-bit.
+	if (!backend.requires_relaxed_precision_analysis)
+		return;
+
+	auto input_precision = analyze_expression_precision(args, length);
+
+	// For expressions which are loaded or directly forwarded, we inherit mediump implicitly.
+	// For dst_id to be analyzed properly, it must inherit any relaxed precision decoration from src_id.
+	if (input_precision == GLSLOptions::Mediump)
+		set_decoration(dst_id, DecorationRelaxedPrecision);
+}
+
+void CompilerMSL::branch(BlockID from, BlockID to)
+{
+	flush_phi(from, to);
+	flush_control_dependent_expressions(from);
+
+	bool to_is_continue = is_continue(to);
+
+	// This is only a continue if we branch to our loop dominator.
+	if ((ir.block_meta[to] & ParsedIR::BLOCK_META_LOOP_HEADER_BIT) != 0 && get<SPIRBlock>(from).loop_dominator == to)
+	{
+		// This can happen if we had a complex continue block which was emitted.
+		// Once the continue block tries to branch to the loop header, just emit continue;
+		// and end the chain here.
+		statement("continue;");
+	}
+	else if (from != to && is_break(to))
+	{
+		// We cannot break to ourselves, so check explicitly for from != to.
+		// This case can trigger if a loop header is all three of these things:
+		// - Continue block
+		// - Loop header
+		// - Break merge target all at once ...
+
+		// Very dirty workaround.
+		// Switch constructs are able to break, but they cannot break out of a loop at the same time,
+		// yet SPIR-V allows it.
+		// Only sensible solution is to make a ladder variable, which we declare at the top of the switch block,
+		// write to the ladder here, and defer the break.
+		// The loop we're breaking out of must dominate the switch block, or there is no ladder breaking case.
+		if (is_loop_break(to))
+		{
+			for (size_t n = current_emitting_switch_stack.size(); n; n--)
+			{
+				auto *current_emitting_switch = current_emitting_switch_stack[n - 1];
+
+				if (current_emitting_switch &&
+				    current_emitting_switch->loop_dominator != BlockID(SPIRBlock::NoDominator) &&
+				    get<SPIRBlock>(current_emitting_switch->loop_dominator).merge_block == to)
+				{
+					if (!current_emitting_switch->need_ladder_break)
+					{
+						force_recompile();
+						current_emitting_switch->need_ladder_break = true;
+					}
+
+					statement("_", current_emitting_switch->self, "_ladder_break = true;");
+				}
+				else
+					break;
+			}
+		}
+		statement("break;");
+	}
+	else if (to_is_continue || from == to)
+	{
+		// For from == to case can happen for a do-while loop which branches into itself.
+		// We don't mark these cases as continue blocks, but the only possible way to branch into
+		// ourselves is through means of continue blocks.
+
+		// If we are merging to a continue block, there is no need to emit the block chain for continue here.
+		// We can branch to the continue block after we merge execution.
+
+		// Here we make use of structured control flow rules from spec:
+		// 2.11: - the merge block declared by a header block cannot be a merge block declared by any other header block
+		//       - each header block must strictly dominate its merge block, unless the merge block is unreachable in the CFG
+		// If we are branching to a merge block, we must be inside a construct which dominates the merge block.
+		auto &block_meta = ir.block_meta[to];
+		bool branching_to_merge =
+		    (block_meta & (ParsedIR::BLOCK_META_SELECTION_MERGE_BIT | ParsedIR::BLOCK_META_MULTISELECT_MERGE_BIT |
+		                   ParsedIR::BLOCK_META_LOOP_MERGE_BIT)) != 0;
+		if (!to_is_continue || !branching_to_merge)
+			branch_to_continue(from, to);
+	}
+	else if (!is_conditional(to))
+		emit_block_chain(get<SPIRBlock>(to));
+
+	// It is important that we check for break before continue.
+	// A block might serve two purposes, a break block for the inner scope, and
+	// a continue block in the outer scope.
+	// Inner scope always takes precedence.
+}
+
+void CompilerMSL::branch(BlockID from, uint32_t cond, BlockID true_block, BlockID false_block)
+{
+	auto &from_block = get<SPIRBlock>(from);
+	BlockID merge_block = from_block.merge == SPIRBlock::MergeSelection ? from_block.next_block : BlockID(0);
+
+	// If we branch directly to our selection merge target, we don't need a code path.
+	bool true_block_needs_code = true_block != merge_block || flush_phi_required(from, true_block);
+	bool false_block_needs_code = false_block != merge_block || flush_phi_required(from, false_block);
+
+	if (!true_block_needs_code && !false_block_needs_code)
+		return;
+
+	// We might have a loop merge here. Only consider selection flattening constructs.
+	// Loop hints are handled explicitly elsewhere.
+	if (from_block.hint == SPIRBlock::HintFlatten || from_block.hint == SPIRBlock::HintDontFlatten)
+		emit_block_hints(from_block);
+
+	if (true_block_needs_code)
+	{
+		statement("if (", to_expression(cond), ")");
+		begin_scope();
+		branch(from, true_block);
+		end_scope();
+
+		if (false_block_needs_code)
+		{
+			statement("else");
+			begin_scope();
+			branch(from, false_block);
+			end_scope();
+		}
+	}
+	else if (false_block_needs_code)
+	{
+		// Only need false path, use negative conditional.
+		statement("if (!", to_enclosed_expression(cond), ")");
+		begin_scope();
+		branch(from, false_block);
+		end_scope();
+	}
+}
+
+void CompilerMSL::branch_to_continue(BlockID from, BlockID to)
+{
+	auto &to_block = get<SPIRBlock>(to);
+	if (from == to)
+		return;
+
+	assert(is_continue(to));
+	if (to_block.complex_continue)
+	{
+		// Just emit the whole block chain as is.
+		auto usage_counts = expression_usage_counts;
+
+		emit_block_chain(to_block);
+
+		// Expression usage counts are moot after returning from the continue block.
+		expression_usage_counts = usage_counts;
+	}
+	else
+	{
+		auto &from_block = get<SPIRBlock>(from);
+		bool outside_control_flow = false;
+		uint32_t loop_dominator = 0;
+
+		// FIXME: Refactor this to not use the old loop_dominator tracking.
+		if (from_block.merge_block)
+		{
+			// If we are a loop header, we don't set the loop dominator,
+			// so just use "self" here.
+			loop_dominator = from;
+		}
+		else if (from_block.loop_dominator != BlockID(SPIRBlock::NoDominator))
+		{
+			loop_dominator = from_block.loop_dominator;
+		}
+
+		if (loop_dominator != 0)
+		{
+			auto &cfg = get_cfg_for_current_function();
+
+			// For non-complex continue blocks, we implicitly branch to the continue block
+			// by having the continue block be part of the loop header in for (; ; continue-block).
+			outside_control_flow = cfg.node_terminates_control_flow_in_sub_graph(loop_dominator, from);
+		}
+
+		// Some simplification for for-loops. We always end up with a useless continue;
+		// statement since we branch to a loop block.
+		// Walk the CFG, if we unconditionally execute the block calling continue assuming we're in the loop block,
+		// we can avoid writing out an explicit continue statement.
+		// Similar optimization to return statements if we know we're outside flow control.
+		if (!outside_control_flow)
+			statement("continue;");
+	}
+}
+
+void CompilerMSL::flush_phi(BlockID from, BlockID to)
+{
+	auto &child = get<SPIRBlock>(to);
+	if (child.ignore_phi_from_block == from)
+		return;
+
+	unordered_set<uint32_t> temporary_phi_variables;
+
+	for (auto itr = begin(child.phi_variables); itr != end(child.phi_variables); ++itr)
+	{
+		auto &phi = *itr;
+
+		if (phi.parent == from)
+		{
+			auto &var = get<SPIRVariable>(phi.function_variable);
+
+			// A Phi variable might be a loop variable, so flush to static expression.
+			if (var.loop_variable && !var.loop_variable_enable)
+				var.static_expression = phi.local_variable;
+			else
+			{
+				flush_variable_declaration(phi.function_variable);
+
+				// Check if we are going to write to a Phi variable that another statement will read from
+				// as part of another Phi node in our target block.
+				// For this case, we will need to copy phi.function_variable to a temporary, and use that for future reads.
+				// This is judged to be extremely rare, so deal with it here using a simple, but suboptimal algorithm.
+				bool need_saved_temporary =
+				    find_if(itr + 1, end(child.phi_variables), [&](const SPIRBlock::Phi &future_phi) -> bool {
+					    return future_phi.local_variable == ID(phi.function_variable) && future_phi.parent == from;
+				    }) != end(child.phi_variables);
+
+				if (need_saved_temporary)
+				{
+					// Need to make sure we declare the phi variable with a copy at the right scope.
+					// We cannot safely declare a temporary here since we might be inside a continue block.
+					if (!var.allocate_temporary_copy)
+					{
+						var.allocate_temporary_copy = true;
+						force_recompile();
+					}
+					statement("_", phi.function_variable, "_copy", " = ", to_name(phi.function_variable), ";");
+					temporary_phi_variables.insert(phi.function_variable);
+				}
+
+				// This might be called in continue block, so make sure we
+				// use this to emit ESSL 1.0 compliant increments/decrements.
+				auto lhs = to_expression(phi.function_variable);
+
+				string rhs;
+				if (temporary_phi_variables.count(phi.local_variable))
+					rhs = join("_", phi.local_variable, "_copy");
+				else
+					rhs = to_pointer_expression(phi.local_variable);
+
+				if (!optimize_read_modify_write(get<SPIRType>(var.basetype), lhs, rhs))
+					statement(lhs, " = ", rhs, ";");
+			}
+
+			register_write(phi.function_variable);
+		}
+	}
+}
+
+bool CompilerMSL::attempt_emit_loop_header(SPIRBlock &block, SPIRBlock::Method method)
+{
+	SPIRBlock::ContinueBlockType continue_type = continue_block_type(get<SPIRBlock>(block.continue_block));
+
+	if (method == SPIRBlock::MergeToSelectForLoop || method == SPIRBlock::MergeToSelectContinueForLoop)
+	{
+		uint32_t current_count = statement_count;
+		// If we're trying to create a true for loop,
+		// we need to make sure that all opcodes before branch statement do not actually emit any code.
+		// We can then take the condition expression and create a for (; cond ; ) { body; } structure instead.
+		emit_block_instructions_with_masked_debug(block);
+
+		bool condition_is_temporary = forced_temporaries.find(block.condition) == end(forced_temporaries);
+
+		// This can work! We only did trivial things which could be forwarded in block body!
+		if (current_count == statement_count && condition_is_temporary)
+		{
+			switch (continue_type)
+			{
+			case SPIRBlock::ForLoop:
+			{
+				// This block may be a dominating block, so make sure we flush undeclared variables before building the for loop header.
+				flush_undeclared_variables(block);
+
+				// Important that we do this in this order because
+				// emitting the continue block can invalidate the condition expression.
+				auto initializer = emit_for_loop_initializers(block);
+				auto condition = to_expression(block.condition);
+
+				// Condition might have to be inverted.
+				if (execution_is_noop(get<SPIRBlock>(block.true_block), get<SPIRBlock>(block.merge_block)))
+					condition = join("!", enclose_expression(condition));
+
+				emit_block_hints(block);
+				if (method != SPIRBlock::MergeToSelectContinueForLoop)
+				{
+					auto continue_block = emit_continue_block(block.continue_block, false, false);
+					statement("for (", initializer, "; ", condition, "; ", continue_block, ")");
+				}
+				else
+					statement("for (", initializer, "; ", condition, "; )");
+				break;
+			}
+
+			case SPIRBlock::WhileLoop:
+			{
+				// This block may be a dominating block, so make sure we flush undeclared variables before building the while loop header.
+				flush_undeclared_variables(block);
+				emit_while_loop_initializers(block);
+				emit_block_hints(block);
+
+				auto condition = to_expression(block.condition);
+				// Condition might have to be inverted.
+				if (execution_is_noop(get<SPIRBlock>(block.true_block), get<SPIRBlock>(block.merge_block)))
+					condition = join("!", enclose_expression(condition));
+
+				statement("while (", condition, ")");
+				break;
+			}
+
+			default:
+				block.disable_block_optimization = true;
+				force_recompile();
+				begin_scope(); // We'll see an end_scope() later.
+				return false;
+			}
+
+			begin_scope();
+			return true;
+		}
+		else
+		{
+			block.disable_block_optimization = true;
+			force_recompile();
+			begin_scope(); // We'll see an end_scope() later.
+			return false;
+		}
+	}
+	else if (method == SPIRBlock::MergeToDirectForLoop)
+	{
+		auto &child = get<SPIRBlock>(block.next_block);
+
+		// This block may be a dominating block, so make sure we flush undeclared variables before building the for loop header.
+		flush_undeclared_variables(child);
+
+		uint32_t current_count = statement_count;
+
+		// If we're trying to create a true for loop,
+		// we need to make sure that all opcodes before branch statement do not actually emit any code.
+		// We can then take the condition expression and create a for (; cond ; ) { body; } structure instead.
+		emit_block_instructions_with_masked_debug(child);
+
+		bool condition_is_temporary = forced_temporaries.find(child.condition) == end(forced_temporaries);
+
+		if (current_count == statement_count && condition_is_temporary)
+		{
+			uint32_t target_block = child.true_block;
+
+			switch (continue_type)
+			{
+			case SPIRBlock::ForLoop:
+			{
+				// Important that we do this in this order because
+				// emitting the continue block can invalidate the condition expression.
+				auto initializer = emit_for_loop_initializers(block);
+				auto condition = to_expression(child.condition);
+
+				// Condition might have to be inverted.
+				if (execution_is_noop(get<SPIRBlock>(child.true_block), get<SPIRBlock>(block.merge_block)))
+				{
+					condition = join("!", enclose_expression(condition));
+					target_block = child.false_block;
+				}
+
+				auto continue_block = emit_continue_block(block.continue_block, false, false);
+				emit_block_hints(block);
+				statement("for (", initializer, "; ", condition, "; ", continue_block, ")");
+				break;
+			}
+
+			case SPIRBlock::WhileLoop:
+			{
+				emit_while_loop_initializers(block);
+				emit_block_hints(block);
+
+				auto condition = to_expression(child.condition);
+				// Condition might have to be inverted.
+				if (execution_is_noop(get<SPIRBlock>(child.true_block), get<SPIRBlock>(block.merge_block)))
+				{
+					condition = join("!", enclose_expression(condition));
+					target_block = child.false_block;
+				}
+
+				statement("while (", condition, ")");
+				break;
+			}
+
+			default:
+				block.disable_block_optimization = true;
+				force_recompile();
+				begin_scope(); // We'll see an end_scope() later.
+				return false;
+			}
+
+			begin_scope();
+			branch(child.self, target_block);
+			return true;
+		}
+		else
+		{
+			block.disable_block_optimization = true;
+			force_recompile();
+			begin_scope(); // We'll see an end_scope() later.
+			return false;
+		}
+	}
+	else
+		return false;
+}
+
+void CompilerMSL::emit_block_instructions_with_masked_debug(SPIRBlock &block)
+{
+	// Have to block debug instructions such as OpLine here, since it will be treated as a statement otherwise,
+	// which breaks loop optimizations.
+	// Any line directive would be declared outside the loop body, which would just be confusing either way.
+	bool old_block_debug_directives = block_debug_directives;
+	block_debug_directives = true;
+	emit_block_instructions(block);
+	block_debug_directives = old_block_debug_directives;
+}
+
+string CompilerMSL::emit_for_loop_initializers(const SPIRBlock &block)
+{
+	if (block.loop_variables.empty())
+		return "";
+
+	bool same_types = for_loop_initializers_are_same_type(block);
+	// We can only declare for loop initializers if all variables are of same type.
+	// If we cannot do this, declare individual variables before the loop header.
+
+	// We might have a loop variable candidate which was not assigned to for some reason.
+	uint32_t missing_initializers = 0;
+	for (auto &variable : block.loop_variables)
+	{
+		uint32_t expr = get<SPIRVariable>(variable).static_expression;
+
+		// Sometimes loop variables are initialized with OpUndef, but we can just declare
+		// a plain variable without initializer in this case.
+		if (expr == 0 || ir.ids[expr].get_type() == TypeUndef)
+			missing_initializers++;
+	}
+
+	if (block.loop_variables.size() == 1 && missing_initializers == 0)
+	{
+		return variable_decl(get<SPIRVariable>(block.loop_variables.front()));
+	}
+	else if (!same_types || missing_initializers == uint32_t(block.loop_variables.size()))
+	{
+		for (auto &loop_var : block.loop_variables)
+			statement(variable_decl(get<SPIRVariable>(loop_var)), ";");
+		return "";
+	}
+	else
+	{
+		// We have a mix of loop variables, either ones with a clear initializer, or ones without.
+		// Separate the two streams.
+		string expr;
+
+		for (auto &loop_var : block.loop_variables)
+		{
+			uint32_t static_expr = get<SPIRVariable>(loop_var).static_expression;
+			if (static_expr == 0 || ir.ids[static_expr].get_type() == TypeUndef)
+			{
+				statement(variable_decl(get<SPIRVariable>(loop_var)), ";");
+			}
+			else
+			{
+				auto &var = get<SPIRVariable>(loop_var);
+				auto &type = get_variable_data_type(var);
+				if (expr.empty())
+				{
+					// For loop initializers are of the form <type id = value, id = value, id = value, etc ...
+					expr = join(to_qualifiers_glsl(var.self), type_to_glsl(type), " ");
+				}
+				else
+				{
+					expr += ", ";
+					// In MSL, being based on C++, the asterisk marking a pointer
+					// binds to the identifier, not the type.
+					if (type.pointer)
+						expr += "* ";
+				}
+
+				expr += join(to_name(loop_var), " = ", to_pointer_expression(var.static_expression));
+			}
+		}
+		return expr;
+	}
+}
+
+void CompilerMSL::emit_mesh_tasks(SPIRBlock &block)
+{
+	statement("EmitMeshTasksEXT(",
+	          to_unpacked_expression(block.mesh.groups[0]), ", ",
+	          to_unpacked_expression(block.mesh.groups[1]), ", ",
+	          to_unpacked_expression(block.mesh.groups[2]), ");");
+}
+
+bool CompilerMSL::for_loop_initializers_are_same_type(const SPIRBlock &block)
+{
+	if (block.loop_variables.size() <= 1)
+		return true;
+
+	uint32_t expected = 0;
+	Bitset expected_flags;
+	for (auto &var : block.loop_variables)
+	{
+		// Don't care about uninitialized variables as they will not be part of the initializers.
+		uint32_t expr = get<SPIRVariable>(var).static_expression;
+		if (expr == 0 || ir.ids[expr].get_type() == TypeUndef)
+			continue;
+
+		if (expected == 0)
+		{
+			expected = get<SPIRVariable>(var).basetype;
+			expected_flags = get_decoration_bitset(var);
+		}
+		else if (expected != get<SPIRVariable>(var).basetype)
+			return false;
+
+		// Precision flags and things like that must also match.
+		if (expected_flags != get_decoration_bitset(var))
+			return false;
+	}
+
+	return true;
 }
