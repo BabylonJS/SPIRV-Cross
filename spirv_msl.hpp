@@ -212,32 +212,6 @@ enum MSLSamplerYCbCrRange
 	MSL_SAMPLER_YCBCR_RANGE_INT_MAX = 0x7fffffff
 };
 
-enum PlsFormat
-{
-	PlsNone = 0,
-
-	PlsR11FG11FB10F,
-	PlsR32F,
-	PlsRG16F,
-	PlsRGB10A2,
-	PlsRGBA8,
-	PlsRG16,
-
-	PlsRGBA8I,
-	PlsRG16I,
-
-	PlsRGB10A2UI,
-	PlsRGBA8UI,
-	PlsRG16UI,
-	PlsR32UI
-};
-
-struct PlsRemap
-{
-	uint32_t id;
-	PlsFormat format;
-};
-
 struct MSLConstexprSampler
 {
 	MSLSamplerCoord coord = MSL_SAMPLER_COORD_NORMALIZED;
@@ -321,6 +295,32 @@ static const uint32_t kArrayCopyMultidimMax = 6;
 class CompilerMSL : public Compiler
 {
 public:
+	enum PlsFormat
+	{
+		PlsNone = 0,
+
+		PlsR11FG11FB10F,
+		PlsR32F,
+		PlsRG16F,
+		PlsRGB10A2,
+		PlsRGBA8,
+		PlsRG16,
+
+		PlsRGBA8I,
+		PlsRG16I,
+
+		PlsRGB10A2UI,
+		PlsRGBA8UI,
+		PlsRG16UI,
+		PlsR32UI
+	};
+
+	struct PlsRemap
+	{
+		uint32_t id;
+		PlsFormat format;
+	};
+
 	// Options for compiling to Metal Shading Language
 	struct Options
 	{
@@ -1658,6 +1658,7 @@ protected:
 	std::unordered_set<std::string> block_ubo_names;
 	std::unordered_set<std::string> block_ssbo_names;
 	std::unordered_set<LocationComponentPair, InternalHasher> masked_output_locations;
+	std::vector<std::pair<uint32_t, uint32_t>> subpass_to_framebuffer_fetch_attachment;
 	
 	bool processing_entry_point = false;
 	bool block_debug_directives = false;
@@ -1957,8 +1958,14 @@ protected:
 	void request_subgroup_feature(ShaderSubgroupSupportHelper::Feature feature);
 	void unroll_array_from_complex_load(uint32_t target_id, uint32_t source_id, std::string &expr);
 	void rewrite_load_for_wrapped_row_major(std::string &expr, TypeID loaded_type, ID ptr);
+	SmallVector<TypeID> workaround_ubo_load_overload_types;
+	void request_workaround_wrapper_overload(TypeID id);
 	bool expression_is_non_value_type_array(uint32_t ptr);
 	void store_flattened_struct(uint32_t lhs_id, uint32_t value);
+	void store_flattened_struct(const std::string &basename, uint32_t rhs, const SPIRType &type,
+	                            const SmallVector<uint32_t> &indices);
+	std::string to_multi_member_reference(const SPIRType &type, const SmallVector<uint32_t> &indices);
+
 	void register_impure_function_call();
 	std::string to_combined_image_sampler(VariableID image_id, VariableID samp_id);
 	void append_global_func_args(const SPIRFunction &func, uint32_t index, SmallVector<std::string> &arglist);
@@ -1967,6 +1974,8 @@ protected:
 	std::string build_composite_combiner(uint32_t result_type, const uint32_t *elems, uint32_t length);
 	std::string to_extract_constant_composite_expression(uint32_t result_type, const SPIRConstant &c,
 	                                                     const uint32_t *chain, uint32_t length);
+	std::string to_composite_constructor_expression(const SPIRType &parent_type, uint32_t id, bool block_like_type);
+	bool remove_unity_swizzle(uint32_t base, std::string &op);
 	bool should_suppress_usage_tracking(uint32_t id) const;
 	void emit_copy_logical_type(uint32_t lhs_id, uint32_t lhs_type_id, uint32_t rhs_id, uint32_t rhs_type_id,
 	                            SmallVector<uint32_t> chain);

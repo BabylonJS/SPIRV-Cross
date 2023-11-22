@@ -43,29 +43,29 @@ enum ExtraSubExpressionType
 	EXTRA_SUB_EXPRESSION_TYPE_AUX = 0x20000000
 };
 
-static uint32_t pls_format_to_components(PlsFormat format)
+static uint32_t pls_format_to_components(CompilerMSL::PlsFormat format)
 {
 	switch (format)
 	{
 	default:
-	case PlsR32F:
-	case PlsR32UI:
+	case CompilerMSL::PlsFormat::PlsR32F:
+	case CompilerMSL::PlsFormat::PlsR32UI:
 		return 1;
 
-	case PlsRG16F:
-	case PlsRG16:
-	case PlsRG16UI:
-	case PlsRG16I:
+	case CompilerMSL::PlsFormat::PlsRG16F:
+	case CompilerMSL::PlsFormat::PlsRG16:
+	case CompilerMSL::PlsFormat::PlsRG16UI:
+	case CompilerMSL::PlsFormat::PlsRG16I:
 		return 2;
 
-	case PlsR11FG11FB10F:
+	case CompilerMSL::PlsFormat::PlsR11FG11FB10F:
 		return 3;
 
-	case PlsRGB10A2:
-	case PlsRGBA8:
-	case PlsRGBA8I:
-	case PlsRGB10A2UI:
-	case PlsRGBA8UI:
+	case CompilerMSL::PlsFormat::PlsRGB10A2:
+	case CompilerMSL::PlsFormat::PlsRGBA8:
+	case CompilerMSL::PlsFormat::PlsRGBA8I:
+	case CompilerMSL::PlsFormat::PlsRGB10A2UI:
+	case CompilerMSL::PlsFormat::PlsRGBA8UI:
 		return 4;
 	}
 }
@@ -29312,3 +29312,1066 @@ void CompilerMSL::GLSL_emit_instruction(const Instruction &instruction)
 	}
 }
 
+void CompilerMSL::unroll_array_from_complex_load(uint32_t target_id, uint32_t source_id, std::string &expr)
+{
+	if (!backend.force_gl_in_out_block)
+		return;
+	// This path is only relevant for GL backends.
+
+	auto *var = maybe_get<SPIRVariable>(source_id);
+	if (!var)
+		return;
+
+	if (var->storage != StorageClassInput && var->storage != StorageClassOutput)
+		return;
+
+	auto &type = get_variable_data_type(*var);
+	if (type.array.empty())
+		return;
+
+	auto builtin = BuiltIn(get_decoration(var->self, DecorationBuiltIn));
+	bool is_builtin = is_builtin_variable(*var) &&
+	                  (builtin == BuiltInPointSize ||
+	                   builtin == BuiltInPosition ||
+	                   builtin == BuiltInSampleMask);
+	bool is_tess = is_tessellation_shader();
+	bool is_patch = has_decoration(var->self, DecorationPatch);
+	bool is_sample_mask = is_builtin && builtin == BuiltInSampleMask;
+
+	// Tessellation input arrays are special in that they are unsized, so we cannot directly copy from it.
+	// We must unroll the array load.
+	// For builtins, we couldn't catch this case normally,
+	// because this is resolved in the OpAccessChain in most cases.
+	// If we load the entire array, we have no choice but to unroll here.
+	if (!is_patch && (is_builtin || is_tess))
+	{
+		auto new_expr = join("_", target_id, "_unrolled");
+		statement(variable_decl(type, new_expr, target_id), ";");
+		string array_expr;
+		if (type.array_size_literal.back())
+		{
+			array_expr = convert_to_string(type.array.back());
+			if (type.array.back() == 0)
+				SPIRV_CROSS_THROW("Cannot unroll an array copy from unsized array.");
+		}
+		else
+			array_expr = to_expression(type.array.back());
+
+		// The array size might be a specialization constant, so use a for-loop instead.
+		statement("for (int i = 0; i < int(", array_expr, "); i++)");
+		begin_scope();
+		if (is_builtin && !is_sample_mask)
+			statement(new_expr, "[i] = gl_in[i].", expr, ";");
+		else if (is_sample_mask)
+		{
+			SPIRType target_type;
+			target_type.basetype = SPIRType::Int;
+			statement(new_expr, "[i] = ", bitcast_expression(target_type, type.basetype, join(expr, "[i]")), ";");
+		}
+		else
+			statement(new_expr, "[i] = ", expr, "[i];");
+		end_scope();
+
+		expr = std::move(new_expr);
+	}
+}
+
+void CompilerMSL::rewrite_load_for_wrapped_row_major(std::string &expr, TypeID loaded_type, ID ptr)
+{
+	// Loading row-major matrices from UBOs on older AMD Windows OpenGL drivers is problematic.
+	// To load these types correctly, we must first wrap them in a dummy function which only purpose is to
+	// ensure row_major decoration is actually respected.
+	auto *var = maybe_get_backing_variable(ptr);
+	if (!var)
+		return;
+
+	auto &backing_type = get<SPIRType>(var->basetype);
+	bool is_ubo = backing_type.basetype == SPIRType::Struct && backing_type.storage == StorageClassUniform &&
+	              has_decoration(backing_type.self, DecorationBlock);
+	if (!is_ubo)
+		return;
+
+	auto *type = &get<SPIRType>(loaded_type);
+	bool rewrite = false;
+	bool relaxed = options.es;
+
+	if (is_matrix(*type))
+	{
+		// To avoid adding a lot of unnecessary meta tracking to forward the row_major state,
+		// we will simply look at the base struct itself. It is exceptionally rare to mix and match row-major/col-major state.
+		// If there is any row-major action going on, we apply the workaround.
+		// It is harmless to apply the workaround to column-major matrices, so this is still a valid solution.
+		// If an access chain occurred, the workaround is not required, so loading vectors or scalars don't need workaround.
+		type = &backing_type;
+	}
+	else
+	{
+		// If we're loading a composite, we don't have overloads like these.
+		relaxed = false;
+	}
+
+	if (type->basetype == SPIRType::Struct)
+	{
+		// If we're loading a struct where any member is a row-major matrix, apply the workaround.
+		for (uint32_t i = 0; i < uint32_t(type->member_types.size()); i++)
+		{
+			auto decorations = combined_decoration_for_member(*type, i);
+			if (decorations.get(DecorationRowMajor))
+				rewrite = true;
+
+			// Since we decide on a per-struct basis, only use mediump wrapper if all candidates are mediump.
+			if (!decorations.get(DecorationRelaxedPrecision))
+				relaxed = false;
+		}
+	}
+
+	if (rewrite)
+	{
+		request_workaround_wrapper_overload(loaded_type);
+		expr = join("spvWorkaroundRowMajor", (relaxed ? "MP" : ""), "(", expr, ")");
+	}
+}
+
+void CompilerMSL::request_workaround_wrapper_overload(TypeID id)
+{
+	// Must be ordered to maintain deterministic output, so vector is appropriate.
+	if (find(begin(workaround_ubo_load_overload_types), end(workaround_ubo_load_overload_types), id) ==
+	    end(workaround_ubo_load_overload_types))
+	{
+		force_recompile();
+		workaround_ubo_load_overload_types.push_back(id);
+	}
+}
+
+bool CompilerMSL::expression_is_non_value_type_array(uint32_t ptr)
+{
+	auto &type = expression_type(ptr);
+	if (!type_is_top_level_array(get_pointee_type(type)))
+		return false;
+
+	if (!backend.array_is_value_type)
+		return true;
+
+	auto *var = maybe_get_backing_variable(ptr);
+	if (!var)
+		return false;
+
+	auto &backed_type = get<SPIRType>(var->basetype);
+	return !backend.array_is_value_type_in_buffer_blocks && backed_type.basetype == SPIRType::Struct &&
+	       has_member_decoration(backed_type.self, 0, DecorationOffset);
+}
+
+void CompilerMSL::store_flattened_struct(const string &basename, uint32_t rhs_id, const SPIRType &type,
+                                          const SmallVector<uint32_t> &indices)
+{
+	SmallVector<uint32_t> sub_indices = indices;
+	sub_indices.push_back(0);
+
+	auto *member_type = &type;
+	for (auto &index : indices)
+		member_type = &get<SPIRType>(member_type->member_types[index]);
+
+	for (uint32_t i = 0; i < uint32_t(member_type->member_types.size()); i++)
+	{
+		sub_indices.back() = i;
+		auto lhs = join(basename, "_", to_member_name(*member_type, i));
+		ParsedIR::sanitize_underscores(lhs);
+
+		if (get<SPIRType>(member_type->member_types[i]).basetype == SPIRType::Struct)
+		{
+			store_flattened_struct(lhs, rhs_id, type, sub_indices);
+		}
+		else
+		{
+			auto rhs = to_expression(rhs_id) + to_multi_member_reference(type, sub_indices);
+			statement(lhs, " = ", rhs, ";");
+		}
+	}
+}
+
+string CompilerMSL::to_multi_member_reference(const SPIRType &type, const SmallVector<uint32_t> &indices)
+{
+	string ret;
+	auto *member_type = &type;
+	for (auto &index : indices)
+	{
+		ret += join(".", to_member_name(*member_type, index));
+		member_type = &get<SPIRType>(member_type->member_types[index]);
+	}
+	return ret;
+}
+
+void CompilerMSL::store_flattened_struct(uint32_t lhs_id, uint32_t value)
+{
+	auto &type = expression_type(lhs_id);
+	auto basename = to_flattened_access_chain_expression(lhs_id);
+	store_flattened_struct(basename, value, type, {});
+}
+
+void CompilerMSL::register_impure_function_call()
+{
+	// Impure functions can modify globals and aliased variables, so invalidate them as well.
+	for (auto global : global_variables)
+		flush_dependees(get<SPIRVariable>(global));
+	for (auto aliased : aliased_variables)
+		flush_dependees(get<SPIRVariable>(aliased));
+}
+
+string CompilerMSL::to_combined_image_sampler(VariableID image_id, VariableID samp_id)
+{
+	// Keep track of the array indices we have used to load the image.
+	// We'll need to use the same array index into the combined image sampler array.
+	auto image_expr = to_non_uniform_aware_expression(image_id);
+	string array_expr;
+	auto array_index = image_expr.find_first_of('[');
+	if (array_index != string::npos)
+		array_expr = image_expr.substr(array_index, string::npos);
+
+	auto &args = current_function->arguments;
+
+	// For GLSL and ESSL targets, we must enumerate all possible combinations for sampler2D(texture2D, sampler) and redirect
+	// all possible combinations into new sampler2D uniforms.
+	auto *image = maybe_get_backing_variable(image_id);
+	auto *samp = maybe_get_backing_variable(samp_id);
+	if (image)
+		image_id = image->self;
+	if (samp)
+		samp_id = samp->self;
+
+	auto image_itr = find_if(begin(args), end(args),
+	                         [image_id](const SPIRFunction::Parameter &param) { return image_id == param.id; });
+
+	auto sampler_itr = find_if(begin(args), end(args),
+	                           [samp_id](const SPIRFunction::Parameter &param) { return samp_id == param.id; });
+
+	if (image_itr != end(args) || sampler_itr != end(args))
+	{
+		// If any parameter originates from a parameter, we will find it in our argument list.
+		bool global_image = image_itr == end(args);
+		bool global_sampler = sampler_itr == end(args);
+		VariableID iid = global_image ? image_id : VariableID(uint32_t(image_itr - begin(args)));
+		VariableID sid = global_sampler ? samp_id : VariableID(uint32_t(sampler_itr - begin(args)));
+
+		auto &combined = current_function->combined_parameters;
+		auto itr = find_if(begin(combined), end(combined), [=](const SPIRFunction::CombinedImageSamplerParameter &p) {
+			return p.global_image == global_image && p.global_sampler == global_sampler && p.image_id == iid &&
+			       p.sampler_id == sid;
+		});
+
+		if (itr != end(combined))
+			return to_expression(itr->id) + array_expr;
+		else
+		{
+			SPIRV_CROSS_THROW("Cannot find mapping for combined sampler parameter, was "
+			                  "build_combined_image_samplers() used "
+			                  "before compile() was called?");
+		}
+	}
+	else
+	{
+		// For global sampler2D, look directly at the global remapping table.
+		auto &mapping = combined_image_samplers;
+		auto itr = find_if(begin(mapping), end(mapping), [image_id, samp_id](const CombinedImageSampler &combined) {
+			return combined.image_id == image_id && combined.sampler_id == samp_id;
+		});
+
+		if (itr != end(combined_image_samplers))
+			return to_expression(itr->combined_id) + array_expr;
+		else
+		{
+			SPIRV_CROSS_THROW("Cannot find mapping for combined sampler, was build_combined_image_samplers() used "
+			                  "before compile() was called?");
+		}
+	}
+}
+
+// Appends function arguments, mapped from global variables, beyond the specified arg index.
+// This is used when a function call uses fewer arguments than the function defines.
+// This situation may occur if the function signature has been dynamically modified to
+// extract global variables referenced from within the function, and convert them to
+// function arguments. This is necessary for shader languages that do not support global
+// access to shader input content from within a function (eg. Metal). Each additional
+// function args uses the name of the global variable. Function nesting will modify the
+// functions and function calls all the way up the nesting chain.
+void CompilerMSL::append_global_func_args(const SPIRFunction &func, uint32_t index, SmallVector<string> &arglist)
+{
+	auto &args = func.arguments;
+	uint32_t arg_cnt = uint32_t(args.size());
+	for (uint32_t arg_idx = index; arg_idx < arg_cnt; arg_idx++)
+	{
+		auto &arg = args[arg_idx];
+		assert(arg.alias_global_variable);
+
+		// If the underlying variable needs to be declared
+		// (ie. a local variable with deferred declaration), do so now.
+		uint32_t var_id = get<SPIRVariable>(arg.id).basevariable;
+		if (var_id)
+			flush_variable_declaration(var_id);
+
+		arglist.push_back(to_func_call_arg(arg, arg.id));
+	}
+}
+
+void CompilerMSL::check_function_call_constraints(const uint32_t *args, uint32_t length)
+{
+	// If our variable is remapped, and we rely on type-remapping information as
+	// well, then we cannot pass the variable as a function parameter.
+	// Fixing this is non-trivial without stamping out variants of the same function,
+	// so for now warn about this and suggest workarounds instead.
+	for (uint32_t i = 0; i < length; i++)
+	{
+		auto *var = maybe_get<SPIRVariable>(args[i]);
+		if (!var || !var->remapped_variable)
+			continue;
+
+		auto &type = get<SPIRType>(var->basetype);
+		if (type.basetype == SPIRType::Image && type.image.dim == DimSubpassData)
+		{
+			SPIRV_CROSS_THROW("Tried passing a remapped subpassInput variable to a function. "
+			                  "This will not work correctly because type-remapping information is lost. "
+			                  "To workaround, please consider not passing the subpass input as a function parameter, "
+			                  "or use in/out variables instead which do not need type remapping information.");
+		}
+	}
+}
+
+string CompilerMSL::build_composite_combiner(uint32_t return_type, const uint32_t *elems, uint32_t length)
+{
+	ID base = 0;
+	string op;
+	string subop;
+
+	// Can only merge swizzles for vectors.
+	auto &type = get<SPIRType>(return_type);
+	bool can_apply_swizzle_opt = type.basetype != SPIRType::Struct && type.array.empty() && type.columns == 1;
+	bool swizzle_optimization = false;
+
+	for (uint32_t i = 0; i < length; i++)
+	{
+		auto *e = maybe_get<SPIRExpression>(elems[i]);
+
+		// If we're merging another scalar which belongs to the same base
+		// object, just merge the swizzles to avoid triggering more than 1 expression read as much as possible!
+		if (can_apply_swizzle_opt && e && e->base_expression && e->base_expression == base)
+		{
+			// Only supposed to be used for vector swizzle -> scalar.
+			assert(!e->expression.empty() && e->expression.front() == '.');
+			subop += e->expression.substr(1, string::npos);
+			swizzle_optimization = true;
+		}
+		else
+		{
+			// We'll likely end up with duplicated swizzles, e.g.
+			// foobar.xyz.xyz from patterns like
+			// OpVectorShuffle
+			// OpCompositeExtract x 3
+			// OpCompositeConstruct 3x + other scalar.
+			// Just modify op in-place.
+			if (swizzle_optimization)
+			{
+				if (backend.swizzle_is_function)
+					subop += "()";
+
+				// Don't attempt to remove unity swizzling if we managed to remove duplicate swizzles.
+				// The base "foo" might be vec4, while foo.xyz is vec3 (OpVectorShuffle) and looks like a vec3 due to the .xyz tacked on.
+				// We only want to remove the swizzles if we're certain that the resulting base will be the same vecsize.
+				// Essentially, we can only remove one set of swizzles, since that's what we have control over ...
+				// Case 1:
+				//  foo.yxz.xyz: Duplicate swizzle kicks in, giving foo.yxz, we are done.
+				//               foo.yxz was the result of OpVectorShuffle and we don't know the type of foo.
+				// Case 2:
+				//  foo.xyz: Duplicate swizzle won't kick in.
+				//           If foo is vec3, we can remove xyz, giving just foo.
+				if (!remove_duplicate_swizzle(subop))
+					remove_unity_swizzle(base, subop);
+
+				// Strips away redundant parens if we created them during component extraction.
+				strip_enclosed_expression(subop);
+				swizzle_optimization = false;
+				op += subop;
+			}
+			else
+				op += subop;
+
+			if (i)
+				op += ", ";
+
+			bool uses_buffer_offset =
+			    type.basetype == SPIRType::Struct && has_member_decoration(type.self, i, DecorationOffset);
+			subop = to_composite_constructor_expression(type, elems[i], uses_buffer_offset);
+		}
+
+		base = e ? e->base_expression : ID(0);
+	}
+
+	if (swizzle_optimization)
+	{
+		if (backend.swizzle_is_function)
+			subop += "()";
+
+		if (!remove_duplicate_swizzle(subop))
+			remove_unity_swizzle(base, subop);
+		// Strips away redundant parens if we created them during component extraction.
+		strip_enclosed_expression(subop);
+	}
+
+	op += subop;
+	return op;
+}
+
+string CompilerMSL::to_extract_constant_composite_expression(uint32_t result_type, const SPIRConstant &c,
+                                                              const uint32_t *chain, uint32_t length)
+{
+	// It is kinda silly if application actually enter this path since they know the constant up front.
+	// It is useful here to extract the plain constant directly.
+	SPIRConstant tmp;
+	tmp.constant_type = result_type;
+	auto &composite_type = get<SPIRType>(c.constant_type);
+	assert(composite_type.basetype != SPIRType::Struct && composite_type.array.empty());
+	assert(!c.specialization);
+
+	if (is_matrix(composite_type))
+	{
+		if (length == 2)
+		{
+			tmp.m.c[0].vecsize = 1;
+			tmp.m.columns = 1;
+			tmp.m.c[0].r[0] = c.m.c[chain[0]].r[chain[1]];
+		}
+		else
+		{
+			assert(length == 1);
+			tmp.m.c[0].vecsize = composite_type.vecsize;
+			tmp.m.columns = 1;
+			tmp.m.c[0] = c.m.c[chain[0]];
+		}
+	}
+	else
+	{
+		assert(length == 1);
+		tmp.m.c[0].vecsize = 1;
+		tmp.m.columns = 1;
+		tmp.m.c[0].r[0] = c.m.c[0].r[chain[0]];
+	}
+
+	return constant_expression(tmp);
+}
+
+string CompilerMSL::to_composite_constructor_expression(const SPIRType &parent_type, uint32_t id, bool block_like_type)
+{
+	auto &type = expression_type(id);
+
+	bool reroll_array = false;
+	bool remapped_boolean = parent_type.basetype == SPIRType::Struct &&
+	                        type.basetype == SPIRType::Boolean &&
+	                        backend.boolean_in_struct_remapped_type != SPIRType::Boolean;
+
+	if (type_is_top_level_array(type))
+	{
+		reroll_array = !backend.array_is_value_type ||
+		               (block_like_type && !backend.array_is_value_type_in_buffer_blocks);
+
+		if (remapped_boolean)
+		{
+			// Forced to reroll if we have to change bool[] to short[].
+			reroll_array = true;
+		}
+	}
+
+	if (reroll_array)
+	{
+		// For this case, we need to "re-roll" an array initializer from a temporary.
+		// We cannot simply pass the array directly, since it decays to a pointer and it cannot
+		// participate in a struct initializer. E.g.
+		// float arr[2] = { 1.0, 2.0 };
+		// Foo foo = { arr }; must be transformed to
+		// Foo foo = { { arr[0], arr[1] } };
+		// The array sizes cannot be deduced from specialization constants since we cannot use any loops.
+
+		// We're only triggering one read of the array expression, but this is fine since arrays have to be declared
+		// as temporaries anyways.
+		return to_rerolled_array_expression(parent_type, to_enclosed_expression(id), type);
+	}
+	else
+	{
+		auto expr = to_unpacked_expression(id);
+		if (remapped_boolean)
+		{
+			auto tmp_type = type;
+			tmp_type.basetype = backend.boolean_in_struct_remapped_type;
+			expr = join(type_to_glsl(tmp_type), "(", expr, ")");
+		}
+
+		return expr;
+	}
+}
+
+// Optimizes away vector swizzles where we have something like
+// vec3 foo;
+// foo.xyz <-- swizzle expression does nothing.
+// This is a very common pattern after OpCompositeCombine.
+bool CompilerMSL::remove_unity_swizzle(uint32_t base, string &op)
+{
+	auto pos = op.find_last_of('.');
+	if (pos == string::npos || pos == 0)
+		return false;
+
+	string final_swiz = op.substr(pos + 1, string::npos);
+
+	if (backend.swizzle_is_function)
+	{
+		if (final_swiz.size() < 2)
+			return false;
+
+		if (final_swiz.substr(final_swiz.size() - 2, string::npos) == "()")
+			final_swiz.erase(final_swiz.size() - 2, string::npos);
+		else
+			return false;
+	}
+
+	// Check if final swizzle is of form .x, .xy, .xyz, .xyzw or similar.
+	// If so, and previous swizzle is of same length,
+	// we can drop the final swizzle altogether.
+	for (uint32_t i = 0; i < final_swiz.size(); i++)
+	{
+		static const char expected[] = { 'x', 'y', 'z', 'w' };
+		if (i >= 4 || final_swiz[i] != expected[i])
+			return false;
+	}
+
+	auto &type = expression_type(base);
+
+	// Sanity checking ...
+	assert(type.columns == 1 && type.array.empty());
+
+	if (type.vecsize == final_swiz.size())
+		op.erase(pos, string::npos);
+	return true;
+}
+
+bool CompilerMSL::should_suppress_usage_tracking(uint32_t id) const
+{
+	// Used only by opcodes which don't do any real "work", they just swizzle data in some fashion.
+	return !expression_is_forwarded(id) || expression_suppresses_usage_tracking(id);
+}
+
+void CompilerMSL::emit_copy_logical_type(uint32_t lhs_id, uint32_t lhs_type_id, uint32_t rhs_id, uint32_t rhs_type_id,
+                                          SmallVector<uint32_t> chain)
+{
+	// Fully unroll all member/array indices one by one.
+
+	auto &lhs_type = get<SPIRType>(lhs_type_id);
+	auto &rhs_type = get<SPIRType>(rhs_type_id);
+
+	if (!lhs_type.array.empty())
+	{
+		// Could use a loop here to support specialization constants, but it gets rather complicated with nested array types,
+		// and this is a rather obscure opcode anyways, keep it simple unless we are forced to.
+		uint32_t array_size = to_array_size_literal(lhs_type);
+		chain.push_back(0);
+
+		for (uint32_t i = 0; i < array_size; i++)
+		{
+			chain.back() = i;
+			emit_copy_logical_type(lhs_id, lhs_type.parent_type, rhs_id, rhs_type.parent_type, chain);
+		}
+	}
+	else if (lhs_type.basetype == SPIRType::Struct)
+	{
+		chain.push_back(0);
+		uint32_t member_count = uint32_t(lhs_type.member_types.size());
+		for (uint32_t i = 0; i < member_count; i++)
+		{
+			chain.back() = i;
+			emit_copy_logical_type(lhs_id, lhs_type.member_types[i], rhs_id, rhs_type.member_types[i], chain);
+		}
+	}
+	else
+	{
+		// Need to handle unpack/packing fixups since this can differ wildly between the logical types,
+		// particularly in MSL.
+		// To deal with this, we emit access chains and go through emit_store_statement
+		// to deal with all the special cases we can encounter.
+
+		AccessChainMeta lhs_meta, rhs_meta;
+		auto lhs = access_chain_internal(lhs_id, chain.data(), uint32_t(chain.size()),
+		                                 ACCESS_CHAIN_INDEX_IS_LITERAL_BIT, &lhs_meta);
+		auto rhs = access_chain_internal(rhs_id, chain.data(), uint32_t(chain.size()),
+		                                 ACCESS_CHAIN_INDEX_IS_LITERAL_BIT, &rhs_meta);
+
+		uint32_t id = ir.increase_bound_by(2);
+		lhs_id = id;
+		rhs_id = id + 1;
+
+		{
+			auto &lhs_expr = set<SPIRExpression>(lhs_id, std::move(lhs), lhs_type_id, true);
+			lhs_expr.need_transpose = lhs_meta.need_transpose;
+
+			if (lhs_meta.storage_is_packed)
+				set_extended_decoration(lhs_id, SPIRVCrossDecorationPhysicalTypePacked);
+			if (lhs_meta.storage_physical_type != 0)
+				set_extended_decoration(lhs_id, SPIRVCrossDecorationPhysicalTypeID, lhs_meta.storage_physical_type);
+
+			forwarded_temporaries.insert(lhs_id);
+			suppressed_usage_tracking.insert(lhs_id);
+		}
+
+		{
+			auto &rhs_expr = set<SPIRExpression>(rhs_id, std::move(rhs), rhs_type_id, true);
+			rhs_expr.need_transpose = rhs_meta.need_transpose;
+
+			if (rhs_meta.storage_is_packed)
+				set_extended_decoration(rhs_id, SPIRVCrossDecorationPhysicalTypePacked);
+			if (rhs_meta.storage_physical_type != 0)
+				set_extended_decoration(rhs_id, SPIRVCrossDecorationPhysicalTypeID, rhs_meta.storage_physical_type);
+
+			forwarded_temporaries.insert(rhs_id);
+			suppressed_usage_tracking.insert(rhs_id);
+		}
+
+		emit_store_statement(lhs_id, rhs_id);
+	}
+}
+
+void CompilerMSL::emit_unary_op_cast(uint32_t result_type, uint32_t result_id, uint32_t op0, const char *op)
+{
+	auto &type = get<SPIRType>(result_type);
+	bool forward = should_forward(op0);
+	emit_op(result_type, result_id, join(type_to_glsl(type), "(", op, to_enclosed_unpacked_expression(op0), ")"), forward);
+	inherit_expression_dependencies(result_id, op0);
+}
+
+void CompilerMSL::emit_unary_op(uint32_t result_type, uint32_t result_id, uint32_t op0, const char *op)
+{
+	bool forward = should_forward(op0);
+	emit_op(result_type, result_id, join(op, to_enclosed_unpacked_expression(op0)), forward);
+	inherit_expression_dependencies(result_id, op0);
+}
+
+bool CompilerMSL::args_will_forward(uint32_t id, const uint32_t *args, uint32_t num_args, bool pure)
+{
+	if (forced_temporaries.find(id) != end(forced_temporaries))
+		return false;
+
+	for (uint32_t i = 0; i < num_args; i++)
+		if (!should_forward(args[i]))
+			return false;
+
+	// We need to forward globals as well.
+	if (!pure)
+	{
+		for (auto global : global_variables)
+			if (!should_forward(global))
+				return false;
+		for (auto aliased : aliased_variables)
+			if (!should_forward(aliased))
+				return false;
+	}
+
+	return true;
+}
+
+void CompilerMSL::emit_unrolled_binary_op(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1,
+                                           const char *op, bool negate, SPIRType::BaseType expected_type)
+{
+	auto &type0 = expression_type(op0);
+	auto &type1 = expression_type(op1);
+
+	SPIRType target_type0 = type0;
+	SPIRType target_type1 = type1;
+	target_type0.basetype = expected_type;
+	target_type1.basetype = expected_type;
+	target_type0.vecsize = 1;
+	target_type1.vecsize = 1;
+
+	auto &type = get<SPIRType>(result_type);
+	auto expr = type_to_glsl_constructor(type);
+	expr += '(';
+	for (uint32_t i = 0; i < type.vecsize; i++)
+	{
+		// Make sure to call to_expression multiple times to ensure
+		// that these expressions are properly flushed to temporaries if needed.
+		if (negate)
+			expr += "!(";
+
+		if (expected_type != SPIRType::Unknown && type0.basetype != expected_type)
+			expr += bitcast_expression(target_type0, type0.basetype, to_extract_component_expression(op0, i));
+		else
+			expr += to_extract_component_expression(op0, i);
+
+		expr += ' ';
+		expr += op;
+		expr += ' ';
+
+		if (expected_type != SPIRType::Unknown && type1.basetype != expected_type)
+			expr += bitcast_expression(target_type1, type1.basetype, to_extract_component_expression(op1, i));
+		else
+			expr += to_extract_component_expression(op1, i);
+
+		if (negate)
+			expr += ")";
+
+		if (i + 1 < type.vecsize)
+			expr += ", ";
+	}
+	expr += ')';
+	emit_op(result_type, result_id, expr, should_forward(op0) && should_forward(op1));
+
+	inherit_expression_dependencies(result_id, op0);
+	inherit_expression_dependencies(result_id, op1);
+}
+
+bool CompilerMSL::check_atomic_image(uint32_t id)
+{
+	auto &type = expression_type(id);
+	if (type.storage == StorageClassImage)
+	{
+		if (options.es && options.version < 320)
+			require_extension_internal("GL_OES_shader_image_atomic");
+
+		auto *var = maybe_get_backing_variable(id);
+		if (var)
+		{
+			if (has_decoration(var->self, DecorationNonWritable) || has_decoration(var->self, DecorationNonReadable))
+			{
+				unset_decoration(var->self, DecorationNonWritable);
+				unset_decoration(var->self, DecorationNonReadable);
+				force_recompile();
+			}
+		}
+		return true;
+	}
+	else
+		return false;
+}
+
+void CompilerMSL::emit_atomic_func_op(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1,
+                                       const char *op)
+{
+	auto &type = get<SPIRType>(result_type);
+	if (type_is_floating_point(type))
+	{
+		if (!options.vulkan_semantics)
+			SPIRV_CROSS_THROW("Floating point atomics requires Vulkan semantics.");
+		if (options.es)
+			SPIRV_CROSS_THROW("Floating point atomics requires desktop GLSL.");
+		require_extension_internal("GL_EXT_shader_atomic_float");
+	}
+
+	forced_temporaries.insert(result_id);
+	emit_op(result_type, result_id,
+	        join(op, "(", to_non_uniform_aware_expression(op0), ", ",
+	             to_unpacked_expression(op1), ")"), false);
+	flush_all_atomic_capable_variables();
+}
+
+void CompilerMSL::emit_atomic_func_op(uint32_t result_type, uint32_t result_id,
+                                       uint32_t op0, uint32_t op1, uint32_t op2,
+                                       const char *op)
+{
+	forced_temporaries.insert(result_id);
+	emit_op(result_type, result_id,
+	        join(op, "(", to_non_uniform_aware_expression(op0), ", ",
+	             to_unpacked_expression(op1), ", ", to_unpacked_expression(op2), ")"), false);
+	flush_all_atomic_capable_variables();
+}
+
+string CompilerMSL::to_non_uniform_aware_expression(uint32_t id)
+{
+	string expr = to_expression(id);
+
+	if (has_decoration(id, DecorationNonUniform))
+		convert_non_uniform_expression(expr, id);
+
+	return expr;
+}
+
+std::string CompilerMSL::convert_separate_image_to_expression(uint32_t id)
+{
+	auto *var = maybe_get_backing_variable(id);
+
+	// If we are fetching from a plain OpTypeImage, we must combine with a dummy sampler in GLSL.
+	// In Vulkan GLSL, we can make use of the newer GL_EXT_samplerless_texture_functions.
+	if (var)
+	{
+		auto &type = get<SPIRType>(var->basetype);
+		if (type.basetype == SPIRType::Image && type.image.sampled == 1 && type.image.dim != DimBuffer)
+		{
+			if (options.vulkan_semantics)
+			{
+				if (dummy_sampler_id)
+				{
+					// Don't need to consider Shadow state since the dummy sampler is always non-shadow.
+					auto sampled_type = type;
+					sampled_type.basetype = SPIRType::SampledImage;
+					return join(type_to_glsl(sampled_type), "(", to_non_uniform_aware_expression(id), ", ",
+					            to_expression(dummy_sampler_id), ")");
+				}
+				else
+				{
+					// Newer glslang supports this extension to deal with texture2D as argument to texture functions.
+					require_extension_internal("GL_EXT_samplerless_texture_functions");
+				}
+			}
+			else
+			{
+				if (!dummy_sampler_id)
+					SPIRV_CROSS_THROW("Cannot find dummy sampler ID. Was "
+					                  "build_dummy_sampler_for_combined_images() called?");
+
+				return to_combined_image_sampler(id, dummy_sampler_id);
+			}
+		}
+	}
+
+	return to_non_uniform_aware_expression(id);
+}
+
+string CompilerMSL::legacy_tex_op(const std::string &op, const SPIRType &imgtype, uint32_t tex)
+{
+	const char *type;
+	switch (imgtype.image.dim)
+	{
+	case spv::Dim1D:
+		// Force 2D path for ES.
+		if (options.es)
+			type = (imgtype.image.arrayed && !options.es) ? "2DArray" : "2D";
+		else
+			type = (imgtype.image.arrayed && !options.es) ? "1DArray" : "1D";
+		break;
+	case spv::Dim2D:
+		type = (imgtype.image.arrayed && !options.es) ? "2DArray" : "2D";
+		break;
+	case spv::Dim3D:
+		type = "3D";
+		break;
+	case spv::DimCube:
+		type = "Cube";
+		break;
+	case spv::DimRect:
+		type = "2DRect";
+		break;
+	case spv::DimBuffer:
+		type = "Buffer";
+		break;
+	case spv::DimSubpassData:
+		type = "2D";
+		break;
+	default:
+		type = "";
+		break;
+	}
+
+	// In legacy GLSL, an extension is required for textureLod in the fragment
+	// shader or textureGrad anywhere.
+	bool legacy_lod_ext = false;
+	auto &execution = get_entry_point();
+	if (op == "textureGrad" || op == "textureProjGrad" ||
+	    ((op == "textureLod" || op == "textureProjLod") && execution.model != ExecutionModelVertex))
+	{
+		if (is_legacy_es())
+		{
+			legacy_lod_ext = true;
+			require_extension_internal("GL_EXT_shader_texture_lod");
+		}
+		else if (is_legacy_desktop())
+			require_extension_internal("GL_ARB_shader_texture_lod");
+	}
+
+	if (op == "textureLodOffset" || op == "textureProjLodOffset")
+	{
+		if (is_legacy_es())
+			SPIRV_CROSS_THROW(join(op, " not allowed in legacy ES"));
+
+		require_extension_internal("GL_EXT_gpu_shader4");
+	}
+
+	// GLES has very limited support for shadow samplers.
+	// Basically shadow2D and shadow2DProj work through EXT_shadow_samplers,
+	// everything else can just throw
+	bool is_comparison = is_depth_image(imgtype, tex);
+	if (is_comparison && is_legacy_es())
+	{
+		if (op == "texture" || op == "textureProj")
+			require_extension_internal("GL_EXT_shadow_samplers");
+		else
+			SPIRV_CROSS_THROW(join(op, " not allowed on depth samplers in legacy ES"));
+
+		if (imgtype.image.dim == spv::DimCube)
+			return "shadowCubeNV";
+	}
+
+	if (op == "textureSize")
+	{
+		if (is_legacy_es())
+			SPIRV_CROSS_THROW("textureSize not supported in legacy ES");
+		if (is_comparison)
+			SPIRV_CROSS_THROW("textureSize not supported on shadow sampler in legacy GLSL");
+		require_extension_internal("GL_EXT_gpu_shader4");
+	}
+
+	if (op == "texelFetch" && is_legacy_es())
+		SPIRV_CROSS_THROW("texelFetch not supported in legacy ES");
+
+	bool is_es_and_depth = is_legacy_es() && is_comparison;
+	std::string type_prefix = is_comparison ? "shadow" : "texture";
+
+	if (op == "texture")
+		return is_es_and_depth ? join(type_prefix, type, "EXT") : join(type_prefix, type);
+	else if (op == "textureLod")
+		return join(type_prefix, type, legacy_lod_ext ? "LodEXT" : "Lod");
+	else if (op == "textureProj")
+		return join(type_prefix, type, is_es_and_depth ? "ProjEXT" : "Proj");
+	else if (op == "textureGrad")
+		return join(type_prefix, type, is_legacy_es() ? "GradEXT" : is_legacy_desktop() ? "GradARB" : "Grad");
+	else if (op == "textureProjLod")
+		return join(type_prefix, type, legacy_lod_ext ? "ProjLodEXT" : "ProjLod");
+	else if (op == "textureLodOffset")
+		return join(type_prefix, type, "LodOffset");
+	else if (op == "textureProjGrad")
+		return join(type_prefix, type,
+		            is_legacy_es() ? "ProjGradEXT" : is_legacy_desktop() ? "ProjGradARB" : "ProjGrad");
+	else if (op == "textureProjLodOffset")
+		return join(type_prefix, type, "ProjLodOffset");
+	else if (op == "textureSize")
+		return join("textureSize", type);
+	else if (op == "texelFetch")
+		return join("texelFetch", type);
+	else
+	{
+		SPIRV_CROSS_THROW(join("Unsupported legacy texture op: ", op));
+	}
+}
+
+bool CompilerMSL::subpass_input_is_framebuffer_fetch(uint32_t id) const
+{
+	if (!has_decoration(id, DecorationInputAttachmentIndex))
+		return false;
+
+	uint32_t input_attachment_index = get_decoration(id, DecorationInputAttachmentIndex);
+	for (auto &remap : subpass_to_framebuffer_fetch_attachment)
+		if (remap.first == input_attachment_index)
+			return true;
+
+	return false;
+}
+
+uint32_t CompilerMSL::mask_relevant_memory_semantics(uint32_t semantics)
+{
+	return semantics & (MemorySemanticsAtomicCounterMemoryMask | MemorySemanticsImageMemoryMask |
+	                    MemorySemanticsWorkgroupMemoryMask | MemorySemanticsUniformMemoryMask |
+	                    MemorySemanticsCrossWorkgroupMemoryMask | MemorySemanticsSubgroupMemoryMask);
+}
+
+const Instruction *CompilerMSL::get_next_instruction_in_block(const Instruction &instr)
+{
+	// FIXME: This is kind of hacky. There should be a cleaner way.
+	auto offset = uint32_t(&instr - current_emitting_block->ops.data());
+	if ((offset + 1) < current_emitting_block->ops.size())
+		return &current_emitting_block->ops[offset + 1];
+	else
+		return nullptr;
+}
+
+void CompilerMSL::emit_spv_amd_shader_ballot_op(uint32_t result_type, uint32_t id, uint32_t eop, const uint32_t *args,
+                                                 uint32_t)
+{
+	require_extension_internal("GL_AMD_shader_ballot");
+
+	enum AMDShaderBallot
+	{
+		SwizzleInvocationsAMD = 1,
+		SwizzleInvocationsMaskedAMD = 2,
+		WriteInvocationAMD = 3,
+		MbcntAMD = 4
+	};
+
+	auto op = static_cast<AMDShaderBallot>(eop);
+
+	switch (op)
+	{
+	case SwizzleInvocationsAMD:
+		emit_binary_func_op(result_type, id, args[0], args[1], "swizzleInvocationsAMD");
+		register_control_dependent_expression(id);
+		break;
+
+	case SwizzleInvocationsMaskedAMD:
+		emit_binary_func_op(result_type, id, args[0], args[1], "swizzleInvocationsMaskedAMD");
+		register_control_dependent_expression(id);
+		break;
+
+	case WriteInvocationAMD:
+		emit_trinary_func_op(result_type, id, args[0], args[1], args[2], "writeInvocationAMD");
+		register_control_dependent_expression(id);
+		break;
+
+	case MbcntAMD:
+		emit_unary_func_op(result_type, id, args[0], "mbcntAMD");
+		register_control_dependent_expression(id);
+		break;
+
+	default:
+		statement("// unimplemented SPV AMD shader ballot op ", eop);
+		break;
+	}
+}
+
+void CompilerMSL::emit_spv_amd_shader_explicit_vertex_parameter_op(uint32_t result_type, uint32_t id, uint32_t eop,
+                                                                    const uint32_t *args, uint32_t)
+{
+	require_extension_internal("GL_AMD_shader_explicit_vertex_parameter");
+
+	enum AMDShaderExplicitVertexParameter
+	{
+		InterpolateAtVertexAMD = 1
+	};
+
+	auto op = static_cast<AMDShaderExplicitVertexParameter>(eop);
+
+	switch (op)
+	{
+	case InterpolateAtVertexAMD:
+		emit_binary_func_op(result_type, id, args[0], args[1], "interpolateAtVertexAMD");
+		break;
+
+	default:
+		statement("// unimplemented SPV AMD shader explicit vertex parameter op ", eop);
+		break;
+	}
+}
+
+void CompilerMSL::emit_spv_amd_gcn_shader_op(uint32_t result_type, uint32_t id, uint32_t eop, const uint32_t *args,
+                                              uint32_t)
+{
+	require_extension_internal("GL_AMD_gcn_shader");
+
+	enum AMDGCNShader
+	{
+		CubeFaceIndexAMD = 1,
+		CubeFaceCoordAMD = 2,
+		TimeAMD = 3
+	};
+
+	auto op = static_cast<AMDGCNShader>(eop);
+
+	switch (op)
+	{
+	case CubeFaceIndexAMD:
+		emit_unary_func_op(result_type, id, args[0], "cubeFaceIndexAMD");
+		break;
+	case CubeFaceCoordAMD:
+		emit_unary_func_op(result_type, id, args[0], "cubeFaceCoordAMD");
+		break;
+	case TimeAMD:
+	{
+		string expr = "timeAMD()";
+		emit_op(result_type, id, expr, true);
+		register_control_dependent_expression(id);
+		break;
+	}
+
+	default:
+		statement("// unimplemented SPV AMD gcn shader op ", eop);
+		break;
+	}
+}
