@@ -18324,3 +18324,3071 @@ void CompilerMSL::emit_function(SPIRFunction &func, const Bitset &return_flags)
 		var.deferred_declaration = false;
 	}
 }
+
+void CompilerMSL::add_header_line(const std::string &line)
+{
+	header_lines.push_back(line);
+}
+
+bool CompilerMSL::variable_is_lut(const SPIRVariable &var) const
+{
+	bool statically_assigned = var.statically_assigned && var.static_expression != ID(0) && var.remapped_variable;
+
+	if (statically_assigned)
+	{
+		auto *constant = maybe_get<SPIRConstant>(var.static_expression);
+		if (constant && constant->is_used_as_lut)
+			return true;
+	}
+
+	return false;
+}
+
+bool CompilerMSL::is_stage_output_variable_masked(const SPIRVariable &var) const
+{
+	auto &type = get<SPIRType>(var.basetype);
+	bool is_block = has_decoration(type.self, DecorationBlock);
+	// Blocks by themselves are never masked. Must be masked per-member.
+	if (is_block)
+		return false;
+
+	bool is_builtin = has_decoration(var.self, DecorationBuiltIn);
+
+	if (is_builtin)
+	{
+		return is_stage_output_builtin_masked(BuiltIn(get_decoration(var.self, DecorationBuiltIn)));
+	}
+	else
+	{
+		if (!has_decoration(var.self, DecorationLocation))
+			return false;
+
+		return is_stage_output_location_masked(
+				get_decoration(var.self, DecorationLocation),
+				get_decoration(var.self, DecorationComponent));
+	}
+}
+
+bool CompilerMSL::is_stage_output_block_member_masked(const SPIRVariable &var, uint32_t index, bool strip_array) const
+{
+	auto &type = get<SPIRType>(var.basetype);
+	bool is_block = has_decoration(type.self, DecorationBlock);
+	if (!is_block)
+		return false;
+
+	BuiltIn builtin = BuiltInMax;
+	if (is_member_builtin(type, index, &builtin))
+	{
+		return is_stage_output_builtin_masked(builtin);
+	}
+	else
+	{
+		uint32_t location = get_declared_member_location(var, index, strip_array);
+		uint32_t component = get_member_decoration(type.self, index, DecorationComponent);
+		return is_stage_output_location_masked(location, component);
+	}
+}
+
+uint32_t CompilerMSL::get_declared_member_location(const SPIRVariable &var, uint32_t mbr_idx, bool strip_array) const
+{
+	auto &block_type = get<SPIRType>(var.basetype);
+	if (has_member_decoration(block_type.self, mbr_idx, DecorationLocation))
+		return get_member_decoration(block_type.self, mbr_idx, DecorationLocation);
+	else
+		return get_accumulated_member_location(var, mbr_idx, strip_array);
+}
+
+uint32_t CompilerMSL::type_to_location_count(const SPIRType &type) const
+{
+	uint32_t count;
+	if (type.basetype == SPIRType::Struct)
+	{
+		uint32_t mbr_count = uint32_t(type.member_types.size());
+		count = 0;
+		for (uint32_t i = 0; i < mbr_count; i++)
+			count += type_to_location_count(get<SPIRType>(type.member_types[i]));
+	}
+	else
+	{
+		count = type.columns > 1 ? type.columns : 1;
+	}
+
+	uint32_t dim_count = uint32_t(type.array.size());
+	for (uint32_t i = 0; i < dim_count; i++)
+		count *= to_array_size_literal(type, i);
+
+	return count;
+}
+
+const char *CompilerMSL::vector_swizzle(int vecsize, int index)
+{
+	static const char *const swizzle[4][4] = {
+		{ ".x", ".y", ".z", ".w" },
+		{ ".xy", ".yz", ".zw", nullptr },
+		{ ".xyz", ".yzw", nullptr, nullptr },
+#if defined(__GNUC__) && (__GNUC__ == 9)
+		// This works around a GCC 9 bug, see details in https://gcc.gnu.org/bugzilla/show_bug.cgi?id=90947.
+		// This array ends up being compiled as all nullptrs, tripping the assertions below.
+		{ "", nullptr, nullptr, "$" },
+#else
+		{ "", nullptr, nullptr, nullptr },
+#endif
+	};
+
+	assert(vecsize >= 1 && vecsize <= 4);
+	assert(index >= 0 && index < 4);
+	assert(swizzle[vecsize - 1][index]);
+
+	return swizzle[vecsize - 1][index];
+}
+
+void CompilerMSL::force_temporary_and_recompile(uint32_t id)
+{
+	auto res = forced_temporaries.insert(id);
+
+	// Forcing new temporaries guarantees forward progress.
+	if (res.second)
+		force_recompile_guarantee_forward_progress();
+	else
+		force_recompile();
+}
+
+void CompilerMSL::handle_invalid_expression(uint32_t id)
+{
+	// We tried to read an invalidated expression.
+	// This means we need another pass at compilation, but next time,
+	// force temporary variables so that they cannot be invalidated.
+	force_temporary_and_recompile(id);
+
+	// If the invalid expression happened as a result of a CompositeInsert
+	// overwrite, we must block this from happening next iteration.
+	if (composite_insert_overwritten.count(id))
+		block_composite_insert_overwrite.insert(id);
+}
+
+string CompilerMSL::to_flattened_struct_member(const string &basename, const SPIRType &type, uint32_t index)
+{
+	auto ret = join(basename, "_", to_member_name(type, index));
+	ParsedIR::sanitize_underscores(ret);
+	return ret;
+}
+
+string CompilerMSL::load_flattened_struct(const string &basename, const SPIRType &type)
+{
+	auto expr = type_to_glsl_constructor(type);
+	expr += '(';
+
+	for (uint32_t i = 0; i < uint32_t(type.member_types.size()); i++)
+	{
+		if (i)
+			expr += ", ";
+
+		auto &member_type = get<SPIRType>(type.member_types[i]);
+		if (member_type.basetype == SPIRType::Struct)
+			expr += load_flattened_struct(to_flattened_struct_member(basename, type, i), member_type);
+		else
+			expr += to_flattened_struct_member(basename, type, i);
+	}
+	expr += ')';
+	return expr;
+}
+
+bool CompilerMSL::expression_is_forwarded(uint32_t id) const
+{
+	return forwarded_temporaries.count(id) != 0;
+}
+
+bool CompilerMSL::expression_suppresses_usage_tracking(uint32_t id) const
+{
+	return suppressed_usage_tracking.count(id) != 0;
+}
+
+void CompilerMSL::track_expression_read(uint32_t id)
+{
+	switch (ir.ids[id].get_type())
+	{
+	case TypeExpression:
+	{
+		auto &e = get<SPIRExpression>(id);
+		for (auto implied_read : e.implied_read_expressions)
+			track_expression_read(implied_read);
+		break;
+	}
+
+	case TypeAccessChain:
+	{
+		auto &e = get<SPIRAccessChain>(id);
+		for (auto implied_read : e.implied_read_expressions)
+			track_expression_read(implied_read);
+		break;
+	}
+
+	default:
+		break;
+	}
+
+	// If we try to read a forwarded temporary more than once we will stamp out possibly complex code twice.
+	// In this case, it's better to just bind the complex expression to the temporary and read that temporary twice.
+	if (expression_is_forwarded(id) && !expression_suppresses_usage_tracking(id))
+	{
+		auto &v = expression_usage_counts[id];
+		v++;
+
+		// If we create an expression outside a loop,
+		// but access it inside a loop, we're implicitly reading it multiple times.
+		// If the expression in question is expensive, we should hoist it out to avoid relying on loop-invariant code motion
+		// working inside the backend compiler.
+		if (expression_read_implies_multiple_reads(id))
+			v++;
+
+		if (v >= 2)
+		{
+			//if (v == 2)
+			//    fprintf(stderr, "ID %u was forced to temporary due to more than 1 expression use!\n", id);
+
+			// Force a recompile after this pass to avoid forwarding this variable.
+			force_temporary_and_recompile(id);
+		}
+	}
+}
+
+string CompilerMSL::to_expression(uint32_t id, bool register_expression_read)
+{
+	auto itr = invalid_expressions.find(id);
+	if (itr != end(invalid_expressions))
+		handle_invalid_expression(id);
+
+	if (ir.ids[id].get_type() == TypeExpression)
+	{
+		// We might have a more complex chain of dependencies.
+		// A possible scenario is that we
+		//
+		// %1 = OpLoad
+		// %2 = OpDoSomething %1 %1. here %2 will have a dependency on %1.
+		// %3 = OpDoSomethingAgain %2 %2. Here %3 will lose the link to %1 since we don't propagate the dependencies like that.
+		// OpStore %1 %foo // Here we can invalidate %1, and hence all expressions which depend on %1. Only %2 will know since it's part of invalid_expressions.
+		// %4 = OpDoSomethingAnotherTime %3 %3 // If we forward all expressions we will see %1 expression after store, not before.
+		//
+		// However, we can propagate up a list of depended expressions when we used %2, so we can check if %2 is invalid when reading %3 after the store,
+		// and see that we should not forward reads of the original variable.
+		auto &expr = get<SPIRExpression>(id);
+		for (uint32_t dep : expr.expression_dependencies)
+			if (invalid_expressions.find(dep) != end(invalid_expressions))
+				handle_invalid_expression(dep);
+	}
+
+	if (register_expression_read)
+		track_expression_read(id);
+
+	switch (ir.ids[id].get_type())
+	{
+	case TypeExpression:
+	{
+		auto &e = get<SPIRExpression>(id);
+		if (e.base_expression)
+			return to_enclosed_expression(e.base_expression) + e.expression;
+		else if (e.need_transpose)
+		{
+			// This should not be reached for access chains, since we always deal explicitly with transpose state
+			// when consuming an access chain expression.
+			uint32_t physical_type_id = get_extended_decoration(id, SPIRVCrossDecorationPhysicalTypeID);
+			bool is_packed = has_extended_decoration(id, SPIRVCrossDecorationPhysicalTypePacked);
+			bool relaxed = has_decoration(id, DecorationRelaxedPrecision);
+			return convert_row_major_matrix(e.expression, get<SPIRType>(e.expression_type), physical_type_id,
+			                                is_packed, relaxed);
+		}
+		else if (flattened_structs.count(id))
+		{
+			return load_flattened_struct(e.expression, get<SPIRType>(e.expression_type));
+		}
+		else
+		{
+			if (is_forcing_recompilation())
+			{
+				// During first compilation phase, certain expression patterns can trigger exponential growth of memory.
+				// Avoid this by returning dummy expressions during this phase.
+				// Do not use empty expressions here, because those are sentinels for other cases.
+				return "_";
+			}
+			else
+				return e.expression;
+		}
+	}
+
+	case TypeConstant:
+	{
+		auto &c = get<SPIRConstant>(id);
+		auto &type = get<SPIRType>(c.constant_type);
+
+		// WorkGroupSize may be a constant.
+		if (has_decoration(c.self, DecorationBuiltIn))
+			return builtin_to_glsl(BuiltIn(get_decoration(c.self, DecorationBuiltIn)), StorageClassGeneric);
+		else if (c.specialization)
+		{
+			if (backend.workgroup_size_is_hidden)
+			{
+				int wg_index = get_constant_mapping_to_workgroup_component(c);
+				if (wg_index >= 0)
+				{
+					auto wg_size = join(builtin_to_glsl(BuiltInWorkgroupSize, StorageClassInput), vector_swizzle(1, wg_index));
+					if (type.basetype != SPIRType::UInt)
+						wg_size = bitcast_expression(type, SPIRType::UInt, wg_size);
+					return wg_size;
+				}
+			}
+
+			if (expression_is_forwarded(id))
+				return constant_expression(c);
+
+			return to_name(id);
+		}
+		else if (c.is_used_as_lut)
+			return to_name(id);
+		else if (type.basetype == SPIRType::Struct && !backend.can_declare_struct_inline)
+			return to_name(id);
+		else if (!type.array.empty() && !backend.can_declare_arrays_inline)
+			return to_name(id);
+		else
+			return constant_expression(c);
+	}
+
+	case TypeConstantOp:
+		return to_name(id);
+
+	case TypeVariable:
+	{
+		auto &var = get<SPIRVariable>(id);
+		// If we try to use a loop variable before the loop header, we have to redirect it to the static expression,
+		// the variable has not been declared yet.
+		if (var.statically_assigned || (var.loop_variable && !var.loop_variable_enable))
+		{
+			// We might try to load from a loop variable before it has been initialized.
+			// Prefer static expression and fallback to initializer.
+			if (var.static_expression)
+				return to_expression(var.static_expression);
+			else if (var.initializer)
+				return to_expression(var.initializer);
+			else
+			{
+				// We cannot declare the variable yet, so have to fake it.
+				uint32_t undef_id = ir.increase_bound_by(1);
+				return emit_uninitialized_temporary_expression(get_variable_data_type_id(var), undef_id).expression;
+			}
+		}
+		else if (var.deferred_declaration)
+		{
+			var.deferred_declaration = false;
+			return variable_decl(var);
+		}
+		else if (flattened_structs.count(id))
+		{
+			return load_flattened_struct(to_name(id), get<SPIRType>(var.basetype));
+		}
+		else
+		{
+			auto &dec = ir.meta[var.self].decoration;
+			if (dec.builtin)
+				return builtin_to_glsl(dec.builtin_type, var.storage);
+			else
+				return to_name(id);
+		}
+	}
+
+	case TypeCombinedImageSampler:
+		// This type should never be taken the expression of directly.
+		// The intention is that texture sampling functions will extract the image and samplers
+		// separately and take their expressions as needed.
+		// GLSL does not use this type because OpSampledImage immediately creates a combined image sampler
+		// expression ala sampler2D(texture, sampler).
+		SPIRV_CROSS_THROW("Combined image samplers have no default expression representation.");
+
+	case TypeAccessChain:
+		// We cannot express this type. They only have meaning in other OpAccessChains, OpStore or OpLoad.
+		SPIRV_CROSS_THROW("Access chains have no default expression representation.");
+
+	default:
+		return to_name(id);
+	}
+}
+
+string CompilerMSL::remap_swizzle(const SPIRType &out_type, uint32_t input_components, const string &expr)
+{
+	if (out_type.vecsize == input_components)
+		return expr;
+	else if (input_components == 1 && !backend.can_swizzle_scalar)
+		return join(type_to_glsl(out_type), "(", expr, ")");
+	else
+	{
+		// FIXME: This will not work with packed expressions.
+		auto e = enclose_expression(expr) + ".";
+		// Just clamp the swizzle index if we have more outputs than inputs.
+		for (uint32_t c = 0; c < out_type.vecsize; c++)
+			e += index_to_swizzle(min(c, input_components - 1));
+		if (backend.swizzle_is_function && out_type.vecsize > 1)
+			e += "()";
+
+		remove_duplicate_swizzle(e);
+		return e;
+	}
+}
+
+int CompilerMSL::get_constant_mapping_to_workgroup_component(const SPIRConstant &c) const
+{
+	auto &entry_point = get_entry_point();
+	int index = -1;
+
+	// Need to redirect specialization constants which are used as WorkGroupSize to the builtin,
+	// since the spec constant declarations are never explicitly declared.
+	if (entry_point.workgroup_size.constant == 0 && entry_point.flags.get(ExecutionModeLocalSizeId))
+	{
+		if (c.self == entry_point.workgroup_size.id_x)
+			index = 0;
+		else if (c.self == entry_point.workgroup_size.id_y)
+			index = 1;
+		else if (c.self == entry_point.workgroup_size.id_z)
+			index = 2;
+	}
+
+	return index;
+}
+
+bool CompilerMSL::expression_read_implies_multiple_reads(uint32_t id) const
+{
+	auto *expr = maybe_get<SPIRExpression>(id);
+	if (!expr)
+		return false;
+
+	// If we're emitting code at a deeper loop level than when we emitted the expression,
+	// we're probably reading the same expression over and over.
+	return current_loop_level > expr->emitted_loop_level;
+}
+
+string CompilerMSL::to_member_name(const SPIRType &type, uint32_t index)
+{
+	if (type.type_alias != TypeID(0) &&
+	    !has_extended_decoration(type.type_alias, SPIRVCrossDecorationBufferBlockRepacked))
+	{
+		return to_member_name(get<SPIRType>(type.type_alias), index);
+	}
+
+	auto &memb = ir.meta[type.self].members;
+	if (index < memb.size() && !memb[index].alias.empty())
+		return memb[index].alias;
+	else
+		return join("_m", index);
+}
+
+uint32_t CompilerMSL::get_accumulated_member_location(const SPIRVariable &var, uint32_t mbr_idx, bool strip_array) const
+{
+	auto &type = strip_array ? get_variable_element_type(var) : get_variable_data_type(var);
+	uint32_t location = get_decoration(var.self, DecorationLocation);
+
+	for (uint32_t i = 0; i < mbr_idx; i++)
+	{
+		auto &mbr_type = get<SPIRType>(type.member_types[i]);
+
+		// Start counting from any place we have a new location decoration.
+		if (has_member_decoration(type.self, mbr_idx, DecorationLocation))
+			location = get_member_decoration(type.self, mbr_idx, DecorationLocation);
+
+		uint32_t location_count = type_to_location_count(mbr_type);
+		location += location_count;
+	}
+
+	return location;
+}
+
+string CompilerMSL::constant_expression(const SPIRConstant &c,
+                                         bool inside_block_like_struct_scope,
+                                         bool inside_struct_scope)
+{
+	auto &type = get<SPIRType>(c.constant_type);
+
+	if (type_is_top_level_pointer(type))
+	{
+		return backend.null_pointer_literal;
+	}
+	else if (!c.subconstants.empty())
+	{
+		// Handles Arrays and structures.
+		string res;
+
+		// Only consider the decay if we are inside a struct scope where we are emitting a member with Offset decoration.
+		// Outside a block-like struct declaration, we can always bind to a constant array with templated type.
+		// Should look at ArrayStride here as well, but it's possible to declare a constant struct
+		// with Offset = 0, using no ArrayStride on the enclosed array type.
+		// A particular CTS test hits this scenario.
+		bool array_type_decays = inside_block_like_struct_scope &&
+		                         type_is_top_level_array(type) &&
+		                         !backend.array_is_value_type_in_buffer_blocks;
+
+		// Allow Metal to use the array<T> template to make arrays a value type
+		bool needs_trailing_tracket = false;
+		if (backend.use_initializer_list && backend.use_typed_initializer_list && type.basetype == SPIRType::Struct &&
+		    !type_is_top_level_array(type))
+		{
+			res = type_to_glsl_constructor(type) + "{ ";
+		}
+		else if (backend.use_initializer_list && backend.use_typed_initializer_list && backend.array_is_value_type &&
+		         type_is_top_level_array(type) && !array_type_decays)
+		{
+			const auto *p_type = &type;
+			SPIRType tmp_type;
+
+			if (inside_struct_scope &&
+			    backend.boolean_in_struct_remapped_type != SPIRType::Boolean &&
+			    type.basetype == SPIRType::Boolean)
+			{
+				tmp_type = type;
+				tmp_type.basetype = backend.boolean_in_struct_remapped_type;
+				p_type = &tmp_type;
+			}
+
+			res = type_to_glsl_constructor(*p_type) + "({ ";
+			needs_trailing_tracket = true;
+		}
+		else if (backend.use_initializer_list)
+		{
+			res = "{ ";
+		}
+		else
+		{
+			res = type_to_glsl_constructor(type) + "(";
+		}
+
+		uint32_t subconstant_index = 0;
+		for (auto &elem : c.subconstants)
+		{
+			if (auto *op = maybe_get<SPIRConstantOp>(elem))
+			{
+				res += constant_op_expression(*op);
+			}
+			else if (maybe_get<SPIRUndef>(elem) != nullptr)
+			{
+				res += to_name(elem);
+			}
+			else
+			{
+				auto &subc = get<SPIRConstant>(elem);
+				if (subc.specialization && !expression_is_forwarded(elem))
+					res += to_name(elem);
+				else
+				{
+					if (!type_is_top_level_array(type) && type.basetype == SPIRType::Struct)
+					{
+						// When we get down to emitting struct members, override the block-like information.
+						// For constants, we can freely mix and match block-like state.
+						inside_block_like_struct_scope =
+						    has_member_decoration(type.self, subconstant_index, DecorationOffset);
+					}
+
+					if (type.basetype == SPIRType::Struct)
+						inside_struct_scope = true;
+
+					res += constant_expression(subc, inside_block_like_struct_scope, inside_struct_scope);
+				}
+			}
+
+			if (&elem != &c.subconstants.back())
+				res += ", ";
+
+			subconstant_index++;
+		}
+
+		res += backend.use_initializer_list ? " }" : ")";
+		if (needs_trailing_tracket)
+			res += ")";
+
+		return res;
+	}
+	else if (type.basetype == SPIRType::Struct && type.member_types.size() == 0)
+	{
+		// Metal tessellation likes empty structs which are then constant expressions.
+		if (backend.supports_empty_struct)
+			return "{ }";
+		else if (backend.use_typed_initializer_list)
+			return join(type_to_glsl(type), "{ 0 }");
+		else if (backend.use_initializer_list)
+			return "{ 0 }";
+		else
+			return join(type_to_glsl(type), "(0)");
+	}
+	else if (c.columns() == 1)
+	{
+		auto res = constant_expression_vector(c, 0);
+
+		if (inside_struct_scope &&
+		    backend.boolean_in_struct_remapped_type != SPIRType::Boolean &&
+		    type.basetype == SPIRType::Boolean)
+		{
+			SPIRType tmp_type = type;
+			tmp_type.basetype = backend.boolean_in_struct_remapped_type;
+			res = join(type_to_glsl(tmp_type), "(", res, ")");
+		}
+
+		return res;
+	}
+	else
+	{
+		string res = type_to_glsl(type) + "(";
+		for (uint32_t col = 0; col < c.columns(); col++)
+		{
+			if (c.specialization_constant_id(col) != 0)
+				res += to_name(c.specialization_constant_id(col));
+			else
+				res += constant_expression_vector(c, col);
+
+			if (col + 1 < c.columns())
+				res += ", ";
+		}
+		res += ")";
+
+		if (inside_struct_scope &&
+		    backend.boolean_in_struct_remapped_type != SPIRType::Boolean &&
+		    type.basetype == SPIRType::Boolean)
+		{
+			SPIRType tmp_type = type;
+			tmp_type.basetype = backend.boolean_in_struct_remapped_type;
+			res = join(type_to_glsl(tmp_type), "(", res, ")");
+		}
+
+		return res;
+	}
+}
+
+string CompilerMSL::constant_expression_vector(const SPIRConstant &c, uint32_t vector)
+{
+	auto type = get<SPIRType>(c.constant_type);
+	type.columns = 1;
+
+	auto scalar_type = type;
+	scalar_type.vecsize = 1;
+
+	string res;
+	bool splat = backend.use_constructor_splatting && c.vector_size() > 1;
+	bool swizzle_splat = backend.can_swizzle_scalar && c.vector_size() > 1;
+
+	if (!type_is_floating_point(type))
+	{
+		// Cannot swizzle literal integers as a special case.
+		swizzle_splat = false;
+	}
+
+	if (splat || swizzle_splat)
+	{
+		// Cannot use constant splatting if we have specialization constants somewhere in the vector.
+		for (uint32_t i = 0; i < c.vector_size(); i++)
+		{
+			if (c.specialization_constant_id(vector, i) != 0)
+			{
+				splat = false;
+				swizzle_splat = false;
+				break;
+			}
+		}
+	}
+
+	if (splat || swizzle_splat)
+	{
+		if (type.width == 64)
+		{
+			uint64_t ident = c.scalar_u64(vector, 0);
+			for (uint32_t i = 1; i < c.vector_size(); i++)
+			{
+				if (ident != c.scalar_u64(vector, i))
+				{
+					splat = false;
+					swizzle_splat = false;
+					break;
+				}
+			}
+		}
+		else
+		{
+			uint32_t ident = c.scalar(vector, 0);
+			for (uint32_t i = 1; i < c.vector_size(); i++)
+			{
+				if (ident != c.scalar(vector, i))
+				{
+					splat = false;
+					swizzle_splat = false;
+				}
+			}
+		}
+	}
+
+	if (c.vector_size() > 1 && !swizzle_splat)
+		res += type_to_glsl(type) + "(";
+
+	switch (type.basetype)
+	{
+	case SPIRType::Half:
+		if (splat || swizzle_splat)
+		{
+			res += convert_half_to_string(c, vector, 0);
+			if (swizzle_splat)
+				res = remap_swizzle(get<SPIRType>(c.constant_type), 1, res);
+		}
+		else
+		{
+			for (uint32_t i = 0; i < c.vector_size(); i++)
+			{
+				if (c.vector_size() > 1 && c.specialization_constant_id(vector, i) != 0)
+					res += to_expression(c.specialization_constant_id(vector, i));
+				else
+					res += convert_half_to_string(c, vector, i);
+
+				if (i + 1 < c.vector_size())
+					res += ", ";
+			}
+		}
+		break;
+
+	case SPIRType::Float:
+		if (splat || swizzle_splat)
+		{
+			res += convert_float_to_string(c, vector, 0);
+			if (swizzle_splat)
+				res = remap_swizzle(get<SPIRType>(c.constant_type), 1, res);
+		}
+		else
+		{
+			for (uint32_t i = 0; i < c.vector_size(); i++)
+			{
+				if (c.vector_size() > 1 && c.specialization_constant_id(vector, i) != 0)
+					res += to_expression(c.specialization_constant_id(vector, i));
+				else
+					res += convert_float_to_string(c, vector, i);
+
+				if (i + 1 < c.vector_size())
+					res += ", ";
+			}
+		}
+		break;
+
+	case SPIRType::Double:
+		if (splat || swizzle_splat)
+		{
+			res += convert_double_to_string(c, vector, 0);
+			if (swizzle_splat)
+				res = remap_swizzle(get<SPIRType>(c.constant_type), 1, res);
+		}
+		else
+		{
+			for (uint32_t i = 0; i < c.vector_size(); i++)
+			{
+				if (c.vector_size() > 1 && c.specialization_constant_id(vector, i) != 0)
+					res += to_expression(c.specialization_constant_id(vector, i));
+				else
+					res += convert_double_to_string(c, vector, i);
+
+				if (i + 1 < c.vector_size())
+					res += ", ";
+			}
+		}
+		break;
+
+	case SPIRType::Int64:
+	{
+		auto tmp = type;
+		tmp.vecsize = 1;
+		tmp.columns = 1;
+		auto int64_type = type_to_glsl(tmp);
+
+		if (splat)
+		{
+			res += convert_to_string(c.scalar_i64(vector, 0), int64_type, backend.long_long_literal_suffix);
+		}
+		else
+		{
+			for (uint32_t i = 0; i < c.vector_size(); i++)
+			{
+				if (c.vector_size() > 1 && c.specialization_constant_id(vector, i) != 0)
+					res += to_expression(c.specialization_constant_id(vector, i));
+				else
+					res += convert_to_string(c.scalar_i64(vector, i), int64_type, backend.long_long_literal_suffix);
+
+				if (i + 1 < c.vector_size())
+					res += ", ";
+			}
+		}
+		break;
+	}
+
+	case SPIRType::UInt64:
+		if (splat)
+		{
+			res += convert_to_string(c.scalar_u64(vector, 0));
+			if (backend.long_long_literal_suffix)
+				res += "ull";
+			else
+				res += "ul";
+		}
+		else
+		{
+			for (uint32_t i = 0; i < c.vector_size(); i++)
+			{
+				if (c.vector_size() > 1 && c.specialization_constant_id(vector, i) != 0)
+					res += to_expression(c.specialization_constant_id(vector, i));
+				else
+				{
+					res += convert_to_string(c.scalar_u64(vector, i));
+					if (backend.long_long_literal_suffix)
+						res += "ull";
+					else
+						res += "ul";
+				}
+
+				if (i + 1 < c.vector_size())
+					res += ", ";
+			}
+		}
+		break;
+
+	case SPIRType::UInt:
+		if (splat)
+		{
+			res += convert_to_string(c.scalar(vector, 0));
+			if (is_legacy())
+			{
+				// Fake unsigned constant literals with signed ones if possible.
+				// Things like array sizes, etc, tend to be unsigned even though they could just as easily be signed.
+				if (c.scalar_i32(vector, 0) < 0)
+					SPIRV_CROSS_THROW("Tried to convert uint literal into int, but this made the literal negative.");
+			}
+			else if (backend.uint32_t_literal_suffix)
+				res += "u";
+		}
+		else
+		{
+			for (uint32_t i = 0; i < c.vector_size(); i++)
+			{
+				if (c.vector_size() > 1 && c.specialization_constant_id(vector, i) != 0)
+					res += to_expression(c.specialization_constant_id(vector, i));
+				else
+				{
+					res += convert_to_string(c.scalar(vector, i));
+					if (is_legacy())
+					{
+						// Fake unsigned constant literals with signed ones if possible.
+						// Things like array sizes, etc, tend to be unsigned even though they could just as easily be signed.
+						if (c.scalar_i32(vector, i) < 0)
+							SPIRV_CROSS_THROW("Tried to convert uint literal into int, but this made "
+							                  "the literal negative.");
+					}
+					else if (backend.uint32_t_literal_suffix)
+						res += "u";
+				}
+
+				if (i + 1 < c.vector_size())
+					res += ", ";
+			}
+		}
+		break;
+
+	case SPIRType::Int:
+		if (splat)
+			res += convert_to_string(c.scalar_i32(vector, 0));
+		else
+		{
+			for (uint32_t i = 0; i < c.vector_size(); i++)
+			{
+				if (c.vector_size() > 1 && c.specialization_constant_id(vector, i) != 0)
+					res += to_expression(c.specialization_constant_id(vector, i));
+				else
+					res += convert_to_string(c.scalar_i32(vector, i));
+				if (i + 1 < c.vector_size())
+					res += ", ";
+			}
+		}
+		break;
+
+	case SPIRType::UShort:
+		if (splat)
+		{
+			res += convert_to_string(c.scalar(vector, 0));
+		}
+		else
+		{
+			for (uint32_t i = 0; i < c.vector_size(); i++)
+			{
+				if (c.vector_size() > 1 && c.specialization_constant_id(vector, i) != 0)
+					res += to_expression(c.specialization_constant_id(vector, i));
+				else
+				{
+					if (*backend.uint16_t_literal_suffix)
+					{
+						res += convert_to_string(c.scalar_u16(vector, i));
+						res += backend.uint16_t_literal_suffix;
+					}
+					else
+					{
+						// If backend doesn't have a literal suffix, we need to value cast.
+						res += type_to_glsl(scalar_type);
+						res += "(";
+						res += convert_to_string(c.scalar_u16(vector, i));
+						res += ")";
+					}
+				}
+
+				if (i + 1 < c.vector_size())
+					res += ", ";
+			}
+		}
+		break;
+
+	case SPIRType::Short:
+		if (splat)
+		{
+			res += convert_to_string(c.scalar_i16(vector, 0));
+		}
+		else
+		{
+			for (uint32_t i = 0; i < c.vector_size(); i++)
+			{
+				if (c.vector_size() > 1 && c.specialization_constant_id(vector, i) != 0)
+					res += to_expression(c.specialization_constant_id(vector, i));
+				else
+				{
+					if (*backend.int16_t_literal_suffix)
+					{
+						res += convert_to_string(c.scalar_i16(vector, i));
+						res += backend.int16_t_literal_suffix;
+					}
+					else
+					{
+						// If backend doesn't have a literal suffix, we need to value cast.
+						res += type_to_glsl(scalar_type);
+						res += "(";
+						res += convert_to_string(c.scalar_i16(vector, i));
+						res += ")";
+					}
+				}
+
+				if (i + 1 < c.vector_size())
+					res += ", ";
+			}
+		}
+		break;
+
+	case SPIRType::UByte:
+		if (splat)
+		{
+			res += convert_to_string(c.scalar_u8(vector, 0));
+		}
+		else
+		{
+			for (uint32_t i = 0; i < c.vector_size(); i++)
+			{
+				if (c.vector_size() > 1 && c.specialization_constant_id(vector, i) != 0)
+					res += to_expression(c.specialization_constant_id(vector, i));
+				else
+				{
+					res += type_to_glsl(scalar_type);
+					res += "(";
+					res += convert_to_string(c.scalar_u8(vector, i));
+					res += ")";
+				}
+
+				if (i + 1 < c.vector_size())
+					res += ", ";
+			}
+		}
+		break;
+
+	case SPIRType::SByte:
+		if (splat)
+		{
+			res += convert_to_string(c.scalar_i8(vector, 0));
+		}
+		else
+		{
+			for (uint32_t i = 0; i < c.vector_size(); i++)
+			{
+				if (c.vector_size() > 1 && c.specialization_constant_id(vector, i) != 0)
+					res += to_expression(c.specialization_constant_id(vector, i));
+				else
+				{
+					res += type_to_glsl(scalar_type);
+					res += "(";
+					res += convert_to_string(c.scalar_i8(vector, i));
+					res += ")";
+				}
+
+				if (i + 1 < c.vector_size())
+					res += ", ";
+			}
+		}
+		break;
+
+	case SPIRType::Boolean:
+		if (splat)
+			res += c.scalar(vector, 0) ? "true" : "false";
+		else
+		{
+			for (uint32_t i = 0; i < c.vector_size(); i++)
+			{
+				if (c.vector_size() > 1 && c.specialization_constant_id(vector, i) != 0)
+					res += to_expression(c.specialization_constant_id(vector, i));
+				else
+					res += c.scalar(vector, i) ? "true" : "false";
+
+				if (i + 1 < c.vector_size())
+					res += ", ";
+			}
+		}
+		break;
+
+	default:
+		SPIRV_CROSS_THROW("Invalid constant expression basetype.");
+	}
+
+	if (c.vector_size() > 1 && !swizzle_splat)
+		res += ")";
+
+	return res;
+}
+
+string CompilerMSL::convert_half_to_string(const SPIRConstant &c, uint32_t col, uint32_t row)
+{
+	string res;
+	float float_value = c.scalar_f16(col, row);
+
+	// There is no literal "hf" in GL_NV_gpu_shader5, so to avoid lots
+	// of complicated workarounds, just value-cast to the half type always.
+	if (std::isnan(float_value) || std::isinf(float_value))
+	{
+		SPIRType type;
+		type.basetype = SPIRType::Half;
+		type.vecsize = 1;
+		type.columns = 1;
+
+		if (float_value == numeric_limits<float>::infinity())
+			res = join(type_to_glsl(type), "(1.0 / 0.0)");
+		else if (float_value == -numeric_limits<float>::infinity())
+			res = join(type_to_glsl(type), "(-1.0 / 0.0)");
+		else if (std::isnan(float_value))
+			res = join(type_to_glsl(type), "(0.0 / 0.0)");
+		else
+			SPIRV_CROSS_THROW("Cannot represent non-finite floating point constant.");
+	}
+	else
+	{
+		SPIRType type;
+		type.basetype = SPIRType::Half;
+		type.vecsize = 1;
+		type.columns = 1;
+		res = join(type_to_glsl(type), "(", convert_to_string(float_value, current_locale_radix_character), ")");
+	}
+
+	return res;
+}
+
+string CompilerMSL::convert_float_to_string(const SPIRConstant &c, uint32_t col, uint32_t row)
+{
+	string res;
+	float float_value = c.scalar_f32(col, row);
+
+	if (std::isnan(float_value) || std::isinf(float_value))
+	{
+		// Use special representation.
+		if (!is_legacy())
+		{
+			SPIRType out_type;
+			SPIRType in_type;
+			out_type.basetype = SPIRType::Float;
+			in_type.basetype = SPIRType::UInt;
+			out_type.vecsize = 1;
+			in_type.vecsize = 1;
+			out_type.width = 32;
+			in_type.width = 32;
+
+			char print_buffer[32];
+#ifdef _WIN32
+			sprintf(print_buffer, "0x%xu", c.scalar(col, row));
+#else
+			snprintf(print_buffer, sizeof(print_buffer), "0x%xu", c.scalar(col, row));
+#endif
+
+			const char *comment = "inf";
+			if (float_value == -numeric_limits<float>::infinity())
+				comment = "-inf";
+			else if (std::isnan(float_value))
+				comment = "nan";
+			res = join(bitcast_glsl_op(out_type, in_type), "(", print_buffer, " /* ", comment, " */)");
+		}
+		else
+		{
+			if (float_value == numeric_limits<float>::infinity())
+			{
+				if (backend.float_literal_suffix)
+					res = "(1.0f / 0.0f)";
+				else
+					res = "(1.0 / 0.0)";
+			}
+			else if (float_value == -numeric_limits<float>::infinity())
+			{
+				if (backend.float_literal_suffix)
+					res = "(-1.0f / 0.0f)";
+				else
+					res = "(-1.0 / 0.0)";
+			}
+			else if (std::isnan(float_value))
+			{
+				if (backend.float_literal_suffix)
+					res = "(0.0f / 0.0f)";
+				else
+					res = "(0.0 / 0.0)";
+			}
+			else
+				SPIRV_CROSS_THROW("Cannot represent non-finite floating point constant.");
+		}
+	}
+	else
+	{
+		res = convert_to_string(float_value, current_locale_radix_character);
+		if (backend.float_literal_suffix)
+			res += "f";
+	}
+
+	return res;
+}
+
+std::string CompilerMSL::convert_double_to_string(const SPIRConstant &c, uint32_t col, uint32_t row)
+{
+	string res;
+	double double_value = c.scalar_f64(col, row);
+
+	if (std::isnan(double_value) || std::isinf(double_value))
+	{
+		// Use special representation.
+		if (!is_legacy())
+		{
+			SPIRType out_type;
+			SPIRType in_type;
+			out_type.basetype = SPIRType::Double;
+			in_type.basetype = SPIRType::UInt64;
+			out_type.vecsize = 1;
+			in_type.vecsize = 1;
+			out_type.width = 64;
+			in_type.width = 64;
+
+			uint64_t u64_value = c.scalar_u64(col, row);
+
+			if (options.es && options.version < 310) // GL_NV_gpu_shader5 fallback requires 310.
+				SPIRV_CROSS_THROW("64-bit integers not supported in ES profile before version 310.");
+			require_extension_internal("GL_ARB_gpu_shader_int64");
+
+			char print_buffer[64];
+#ifdef _WIN32
+			sprintf(print_buffer, "0x%llx%s", static_cast<unsigned long long>(u64_value),
+			        backend.long_long_literal_suffix ? "ull" : "ul");
+#else
+			snprintf(print_buffer, sizeof(print_buffer), "0x%llx%s", static_cast<unsigned long long>(u64_value),
+			         backend.long_long_literal_suffix ? "ull" : "ul");
+#endif
+
+			const char *comment = "inf";
+			if (double_value == -numeric_limits<double>::infinity())
+				comment = "-inf";
+			else if (std::isnan(double_value))
+				comment = "nan";
+			res = join(bitcast_glsl_op(out_type, in_type), "(", print_buffer, " /* ", comment, " */)");
+		}
+		else
+		{
+			if (options.es)
+				SPIRV_CROSS_THROW("FP64 not supported in ES profile.");
+			if (options.version < 400)
+				require_extension_internal("GL_ARB_gpu_shader_fp64");
+
+			if (double_value == numeric_limits<double>::infinity())
+			{
+				if (backend.double_literal_suffix)
+					res = "(1.0lf / 0.0lf)";
+				else
+					res = "(1.0 / 0.0)";
+			}
+			else if (double_value == -numeric_limits<double>::infinity())
+			{
+				if (backend.double_literal_suffix)
+					res = "(-1.0lf / 0.0lf)";
+				else
+					res = "(-1.0 / 0.0)";
+			}
+			else if (std::isnan(double_value))
+			{
+				if (backend.double_literal_suffix)
+					res = "(0.0lf / 0.0lf)";
+				else
+					res = "(0.0 / 0.0)";
+			}
+			else
+				SPIRV_CROSS_THROW("Cannot represent non-finite floating point constant.");
+		}
+	}
+	else
+	{
+		res = convert_to_string(double_value, current_locale_radix_character);
+		if (backend.double_literal_suffix)
+			res += "lf";
+	}
+
+	return res;
+}
+
+void CompilerMSL::require_extension_internal(const string &ext)
+{
+	if (backend.supports_extensions && !has_extension(ext))
+	{
+		forced_extensions.push_back(ext);
+		force_recompile();
+	}
+}
+
+bool CompilerMSL::has_extension(const std::string &ext) const
+{
+	auto itr = find(begin(forced_extensions), end(forced_extensions), ext);
+	return itr != end(forced_extensions);
+}
+
+void CompilerMSL::mask_stage_output_by_builtin(BuiltIn builtin)
+{
+	masked_output_builtins.insert(builtin);
+}
+
+// Used explicitly when we want to read a row-major expression, but without any transpose shenanigans.
+// need_transpose must be forced to false.
+string CompilerMSL::to_unpacked_row_major_matrix_expression(uint32_t id)
+{
+	return unpack_expression_type(to_expression(id), expression_type(id),
+	                              get_extended_decoration(id, SPIRVCrossDecorationPhysicalTypeID),
+	                              has_extended_decoration(id, SPIRVCrossDecorationPhysicalTypePacked), true);
+}
+
+string CompilerMSL::to_unpacked_expression(uint32_t id, bool register_expression_read)
+{
+	// If we need to transpose, it will also take care of unpacking rules.
+	auto *e = maybe_get<SPIRExpression>(id);
+	bool need_transpose = e && e->need_transpose;
+	bool is_remapped = has_extended_decoration(id, SPIRVCrossDecorationPhysicalTypeID);
+	bool is_packed = has_extended_decoration(id, SPIRVCrossDecorationPhysicalTypePacked);
+
+	if (!need_transpose && (is_remapped || is_packed))
+	{
+		return unpack_expression_type(to_expression(id, register_expression_read),
+		                              get_pointee_type(expression_type_id(id)),
+		                              get_extended_decoration(id, SPIRVCrossDecorationPhysicalTypeID),
+		                              has_extended_decoration(id, SPIRVCrossDecorationPhysicalTypePacked), false);
+	}
+	else
+		return to_expression(id, register_expression_read);
+}
+
+string CompilerMSL::to_dereferenced_expression(uint32_t id, bool register_expression_read)
+{
+	auto &type = expression_type(id);
+	if (type.pointer && should_dereference(id))
+		return dereference_expression(type, to_enclosed_expression(id, register_expression_read));
+	else
+		return to_expression(id, register_expression_read);
+}
+
+string CompilerMSL::to_extract_component_expression(uint32_t id, uint32_t index)
+{
+	auto expr = to_enclosed_expression(id);
+	if (has_extended_decoration(id, SPIRVCrossDecorationPhysicalTypePacked))
+		return join(expr, "[", index, "]");
+	else
+		return join(expr, ".", index_to_swizzle(index));
+}
+
+// Just like to_expression except that we enclose the expression inside parentheses if needed.
+string CompilerMSL::to_enclosed_expression(uint32_t id, bool register_expression_read)
+{
+	return enclose_expression(to_expression(id, register_expression_read));
+}
+
+string CompilerMSL::type_to_glsl_constructor(const SPIRType &type)
+{
+	if (backend.use_array_constructor && type.array.size() > 1)
+	{
+		if (options.flatten_multidimensional_arrays)
+			SPIRV_CROSS_THROW("Cannot flatten constructors of multidimensional array constructors, "
+			                  "e.g. float[][]().");
+		else if (!options.es && options.version < 430)
+			require_extension_internal("GL_ARB_arrays_of_arrays");
+		else if (options.es && options.version < 310)
+			SPIRV_CROSS_THROW("Arrays of arrays not supported before ESSL version 310.");
+	}
+
+	auto e = type_to_glsl(type);
+	if (backend.use_array_constructor)
+	{
+		for (uint32_t i = 0; i < type.array.size(); i++)
+			e += "[]";
+	}
+	return e;
+}
+
+string CompilerMSL::to_enclosed_unpacked_expression(uint32_t id, bool register_expression_read)
+{
+	return enclose_expression(to_unpacked_expression(id, register_expression_read));
+}
+
+string CompilerMSL::to_pointer_expression(uint32_t id, bool register_expression_read)
+{
+	auto &type = expression_type(id);
+	if (type.pointer && expression_is_lvalue(id) && !should_dereference(id))
+		return address_of_expression(to_enclosed_expression(id, register_expression_read));
+	else
+		return to_unpacked_expression(id, register_expression_read);
+}
+
+string CompilerMSL::enclose_expression(const string &expr)
+{
+	// If this expression contains any spaces which are not enclosed by parentheses,
+	// we need to enclose it so we can treat the whole string as an expression.
+	// This happens when two expressions have been part of a binary op earlier.
+	if (needs_enclose_expression(expr))
+		return join('(', expr, ')');
+	else
+		return expr;
+}
+
+bool CompilerMSL::optimize_read_modify_write(const SPIRType &type, const string &lhs, const string &rhs)
+{
+	// Do this with strings because we have a very clear pattern we can check for and it avoids
+	// adding lots of special cases to the code emission.
+	if (rhs.size() < lhs.size() + 3)
+		return false;
+
+	// Do not optimize matrices. They are a bit awkward to reason about in general
+	// (in which order does operation happen?), and it does not work on MSL anyways.
+	if (type.vecsize > 1 && type.columns > 1)
+		return false;
+
+	auto index = rhs.find(lhs);
+	if (index != 0)
+		return false;
+
+	// TODO: Shift operators, but it's not important for now.
+	auto op = rhs.find_first_of("+-/*%|&^", lhs.size() + 1);
+	if (op != lhs.size() + 1)
+		return false;
+
+	// Check that the op is followed by space. This excludes && and ||.
+	if (rhs[op + 1] != ' ')
+		return false;
+
+	char bop = rhs[op];
+	auto expr = rhs.substr(lhs.size() + 3);
+
+	// Avoids false positives where we get a = a * b + c.
+	// Normally, these expressions are always enclosed, but unexpected code paths may end up hitting this.
+	if (needs_enclose_expression(expr))
+		return false;
+
+	// Try to find increments and decrements. Makes it look neater as += 1, -= 1 is fairly rare to see in real code.
+	// Find some common patterns which are equivalent.
+	if ((bop == '+' || bop == '-') && (expr == "1" || expr == "uint(1)" || expr == "1u" || expr == "int(1u)"))
+		statement(lhs, bop, bop, ";");
+	else
+		statement(lhs, " ", bop, "= ", expr, ";");
+	return true;
+}
+
+bool CompilerMSL::needs_enclose_expression(const std::string &expr)
+{
+	bool need_parens = false;
+
+	// If the expression starts with a unary we need to enclose to deal with cases where we have back-to-back
+	// unary expressions.
+	if (!expr.empty())
+	{
+		auto c = expr.front();
+		if (c == '-' || c == '+' || c == '!' || c == '~' || c == '&' || c == '*')
+			need_parens = true;
+	}
+
+	if (!need_parens)
+	{
+		uint32_t paren_count = 0;
+		for (auto c : expr)
+		{
+			if (c == '(' || c == '[')
+				paren_count++;
+			else if (c == ')' || c == ']')
+			{
+				assert(paren_count);
+				paren_count--;
+			}
+			else if (c == ' ' && paren_count == 0)
+			{
+				need_parens = true;
+				break;
+			}
+		}
+		assert(paren_count == 0);
+	}
+
+	return need_parens;
+}
+
+std::string CompilerMSL::bitcast_expression(SPIRType::BaseType target_type, uint32_t arg)
+{
+	auto expr = to_expression(arg);
+	auto &src_type = expression_type(arg);
+	if (src_type.basetype != target_type)
+	{
+		auto target = src_type;
+		target.basetype = target_type;
+		expr = join(bitcast_glsl_op(target, src_type), "(", expr, ")");
+	}
+
+	return expr;
+}
+
+std::string CompilerMSL::bitcast_expression(const SPIRType &target_type, SPIRType::BaseType expr_type,
+                                             const std::string &expr)
+{
+	if (target_type.basetype == expr_type)
+		return expr;
+
+	auto src_type = target_type;
+	src_type.basetype = expr_type;
+	return join(bitcast_glsl_op(target_type, src_type), "(", expr, ")");
+}
+
+string CompilerMSL::constant_value_macro_name(uint32_t id)
+{
+	return join("SPIRV_CROSS_CONSTANT_ID_", id);
+}
+
+void CompilerMSL::emit_struct(SPIRType &type)
+{
+	// Struct types can be stamped out multiple times
+	// with just different offsets, matrix layouts, etc ...
+	// Type-punning with these types is legal, which complicates things
+	// when we are storing struct and array types in an SSBO for example.
+	// If the type master is packed however, we can no longer assume that the struct declaration will be redundant.
+	if (type.type_alias != TypeID(0) &&
+	    !has_extended_decoration(type.type_alias, SPIRVCrossDecorationBufferBlockRepacked))
+		return;
+
+	add_resource_name(type.self);
+	auto name = type_to_glsl(type);
+
+	statement(!backend.explicit_struct_type ? "struct " : "", name);
+	begin_scope();
+
+	type.member_name_cache.clear();
+
+	uint32_t i = 0;
+	bool emitted = false;
+	for (auto &member : type.member_types)
+	{
+		add_member_name(type, i);
+		emit_struct_member(type, member, i);
+		i++;
+		emitted = true;
+	}
+
+	// Don't declare empty structs in GLSL, this is not allowed.
+	if (type_is_empty(type) && !backend.supports_empty_struct)
+	{
+		statement("int empty_struct_member;");
+		emitted = true;
+	}
+
+	if (has_extended_decoration(type.self, SPIRVCrossDecorationPaddingTarget))
+		emit_struct_padding_target(type);
+
+	end_scope_decl();
+
+	if (emitted)
+		statement("");
+}
+
+void CompilerMSL::add_member_name(SPIRType &type, uint32_t index)
+{
+	auto &memb = ir.meta[type.self].members;
+	if (index < memb.size() && !memb[index].alias.empty())
+	{
+		auto &name = memb[index].alias;
+		if (name.empty())
+			return;
+
+		ParsedIR::sanitize_identifier(name, true, true);
+		update_name_cache(type.member_name_cache, name);
+	}
+}
+
+bool CompilerMSL::type_is_empty(const SPIRType &type)
+{
+	return type.basetype == SPIRType::Struct && type.member_types.empty();
+}
+
+bool CompilerMSL::should_forward(uint32_t id) const
+{
+	// If id is a variable we will try to forward it regardless of force_temporary check below
+	// This is important because otherwise we'll get local sampler copies (highp sampler2D foo = bar) that are invalid in OpenGL GLSL
+
+	auto *var = maybe_get<SPIRVariable>(id);
+	if (var)
+	{
+		// Never forward volatile builtin variables, e.g. SPIR-V 1.6 HelperInvocation.
+		return !(has_decoration(id, DecorationBuiltIn) && has_decoration(id, DecorationVolatile));
+	}
+
+	// For debugging emit temporary variables for all expressions
+	if (options.force_temporary)
+		return false;
+
+	// If an expression carries enough dependencies we need to stop forwarding at some point,
+	// or we explode compilers. There are usually limits to how much we can nest expressions.
+	auto *expr = maybe_get<SPIRExpression>(id);
+	const uint32_t max_expression_dependencies = 64;
+	if (expr && expr->expression_dependencies.size() >= max_expression_dependencies)
+		return false;
+
+	if (expr && expr->loaded_from
+		&& has_decoration(expr->loaded_from, DecorationBuiltIn)
+		&& has_decoration(expr->loaded_from, DecorationVolatile))
+	{
+		// Never forward volatile builtin variables, e.g. SPIR-V 1.6 HelperInvocation.
+		return false;
+	}
+
+	// Immutable expression can always be forwarded.
+	if (is_immutable(id))
+		return true;
+
+	return false;
+}
+
+SPIRExpression &CompilerMSL::emit_op(uint32_t result_type, uint32_t result_id, const string &rhs, bool forwarding,
+                                      bool suppress_usage_tracking)
+{
+	if (forwarding && (forced_temporaries.find(result_id) == end(forced_temporaries)))
+	{
+		// Just forward it without temporary.
+		// If the forward is trivial, we do not force flushing to temporary for this expression.
+		forwarded_temporaries.insert(result_id);
+		if (suppress_usage_tracking)
+			suppressed_usage_tracking.insert(result_id);
+
+		return set<SPIRExpression>(result_id, rhs, result_type, true);
+	}
+	else
+	{
+		// If expression isn't immutable, bind it to a temporary and make the new temporary immutable (they always are).
+		statement(declare_temporary(result_type, result_id), rhs, ";");
+		return set<SPIRExpression>(result_id, to_name(result_id), result_type, true);
+	}
+}
+
+string CompilerMSL::declare_temporary(uint32_t result_type, uint32_t result_id)
+{
+	auto &type = get<SPIRType>(result_type);
+
+	// If we're declaring temporaries inside continue blocks,
+	// we must declare the temporary in the loop header so that the continue block can avoid declaring new variables.
+	if (!block_temporary_hoisting && current_continue_block && !hoisted_temporaries.count(result_id))
+	{
+		auto &header = get<SPIRBlock>(current_continue_block->loop_dominator);
+		if (find_if(begin(header.declare_temporary), end(header.declare_temporary),
+		            [result_type, result_id](const pair<uint32_t, uint32_t> &tmp) {
+			            return tmp.first == result_type && tmp.second == result_id;
+		            }) == end(header.declare_temporary))
+		{
+			header.declare_temporary.emplace_back(result_type, result_id);
+			hoisted_temporaries.insert(result_id);
+			force_recompile_guarantee_forward_progress();
+		}
+
+		return join(to_name(result_id), " = ");
+	}
+	else if (hoisted_temporaries.count(result_id))
+	{
+		// The temporary has already been declared earlier, so just "declare" the temporary by writing to it.
+		return join(to_name(result_id), " = ");
+	}
+	else
+	{
+		// The result_id has not been made into an expression yet, so use flags interface.
+		add_local_variable_name(result_id);
+		auto &flags = get_decoration_bitset(result_id);
+		return join(flags_to_qualifiers_glsl(type, flags), variable_decl(type, to_name(result_id)), " = ");
+	}
+}
+
+bool CompilerMSL::should_dereference(uint32_t id)
+{
+	const auto &type = expression_type(id);
+	// Non-pointer expressions don't need to be dereferenced.
+	if (!type.pointer)
+		return false;
+
+	// Handles shouldn't be dereferenced either.
+	if (!expression_is_lvalue(id))
+		return false;
+
+	// If id is a variable but not a phi variable, we should not dereference it.
+	if (auto *var = maybe_get<SPIRVariable>(id))
+		return var->phi_variable;
+
+	if (auto *expr = maybe_get<SPIRExpression>(id))
+	{
+		// If id is an access chain, we should not dereference it.
+		if (expr->access_chain)
+			return false;
+
+		// If id is a forwarded copy of a variable pointer, we should not dereference it.
+		SPIRVariable *var = nullptr;
+		while (expr->loaded_from && expression_is_forwarded(expr->self))
+		{
+			auto &src_type = expression_type(expr->loaded_from);
+			// To be a copy, the pointer and its source expression must be the
+			// same type. Can't check type.self, because for some reason that's
+			// usually the base type with pointers stripped off. This check is
+			// complex enough that I've hoisted it out of the while condition.
+			if (src_type.pointer != type.pointer || src_type.pointer_depth != type.pointer_depth ||
+			    src_type.parent_type != type.parent_type)
+				break;
+			if ((var = maybe_get<SPIRVariable>(expr->loaded_from)))
+				break;
+			if (!(expr = maybe_get<SPIRExpression>(expr->loaded_from)))
+				break;
+		}
+
+		return !var || var->phi_variable;
+	}
+
+	// Otherwise, we should dereference this pointer expression.
+	return true;
+}
+
+string CompilerMSL::flags_to_qualifiers_glsl(const SPIRType &type, const Bitset &flags)
+{
+	// GL_EXT_buffer_reference variables can be marked as restrict.
+	if (flags.get(DecorationRestrictPointerEXT))
+		return "restrict ";
+
+	string qual;
+
+	if (type_is_floating_point(type) && flags.get(DecorationNoContraction) && backend.support_precise_qualifier)
+		qual = "precise ";
+
+	// Structs do not have precision qualifiers, neither do doubles (desktop only anyways, so no mediump/highp).
+	bool type_supports_precision =
+			type.basetype == SPIRType::Float || type.basetype == SPIRType::Int || type.basetype == SPIRType::UInt ||
+			type.basetype == SPIRType::Image || type.basetype == SPIRType::SampledImage ||
+			type.basetype == SPIRType::Sampler;
+
+	if (!type_supports_precision)
+		return qual;
+
+	if (options.es)
+	{
+		auto &execution = get_entry_point();
+
+		if (flags.get(DecorationRelaxedPrecision))
+		{
+			bool implied_fmediump = type.basetype == SPIRType::Float &&
+			                        options.fragment.default_float_precision == GLSLOptions::Mediump &&
+			                        execution.model == ExecutionModelFragment;
+
+			bool implied_imediump = (type.basetype == SPIRType::Int || type.basetype == SPIRType::UInt) &&
+			                        options.fragment.default_int_precision == GLSLOptions::Mediump &&
+			                        execution.model == ExecutionModelFragment;
+
+			qual += (implied_fmediump || implied_imediump) ? "" : "mediump ";
+		}
+		else
+		{
+			bool implied_fhighp =
+			    type.basetype == SPIRType::Float && ((options.fragment.default_float_precision == GLSLOptions::Highp &&
+			                                          execution.model == ExecutionModelFragment) ||
+			                                         (execution.model != ExecutionModelFragment));
+
+			bool implied_ihighp = (type.basetype == SPIRType::Int || type.basetype == SPIRType::UInt) &&
+			                      ((options.fragment.default_int_precision == GLSLOptions::Highp &&
+			                        execution.model == ExecutionModelFragment) ||
+			                       (execution.model != ExecutionModelFragment));
+
+			qual += (implied_fhighp || implied_ihighp) ? "" : "highp ";
+		}
+	}
+	else if (backend.allow_precision_qualifiers)
+	{
+		// Vulkan GLSL supports precision qualifiers, even in desktop profiles, which is convenient.
+		// The default is highp however, so only emit mediump in the rare case that a shader has these.
+		if (flags.get(DecorationRelaxedPrecision))
+			qual += "mediump ";
+	}
+
+	return qual;
+}
+
+string CompilerMSL::address_of_expression(const std::string &expr)
+{
+	if (expr.size() > 3 && expr[0] == '(' && expr[1] == '*' && expr.back() == ')')
+	{
+		// If we have an expression which looks like (*foo), taking the address of it is the same as stripping
+		// the first two and last characters. We might have to enclose the expression.
+		// This doesn't work for cases like (*foo + 10),
+		// but this is an r-value expression which we cannot take the address of anyways.
+		return enclose_expression(expr.substr(2, expr.size() - 3));
+	}
+	else if (expr.front() == '*')
+	{
+		// If this expression starts with a dereference operator ('*'), then
+		// just return the part after the operator.
+		return expr.substr(1);
+	}
+	else
+		return join('&', enclose_expression(expr));
+}
+
+string CompilerMSL::access_chain_internal(uint32_t base, const uint32_t *indices, uint32_t count,
+                                           AccessChainFlags flags, AccessChainMeta *meta)
+{
+	string expr;
+
+	bool index_is_literal = (flags & ACCESS_CHAIN_INDEX_IS_LITERAL_BIT) != 0;
+	bool msb_is_id = (flags & ACCESS_CHAIN_LITERAL_MSB_FORCE_ID) != 0;
+	bool chain_only = (flags & ACCESS_CHAIN_CHAIN_ONLY_BIT) != 0;
+	bool ptr_chain = (flags & ACCESS_CHAIN_PTR_CHAIN_BIT) != 0;
+	bool register_expression_read = (flags & ACCESS_CHAIN_SKIP_REGISTER_EXPRESSION_READ_BIT) == 0;
+	bool flatten_member_reference = (flags & ACCESS_CHAIN_FLATTEN_ALL_MEMBERS_BIT) != 0;
+
+	if (!chain_only)
+	{
+		// We handle transpose explicitly, so don't resolve that here.
+		auto *e = maybe_get<SPIRExpression>(base);
+		bool old_transpose = e && e->need_transpose;
+		if (e)
+			e->need_transpose = false;
+		expr = to_enclosed_expression(base, register_expression_read);
+		if (e)
+			e->need_transpose = old_transpose;
+	}
+
+	// Start traversing type hierarchy at the proper non-pointer types,
+	// but keep type_id referencing the original pointer for use below.
+	uint32_t type_id = expression_type_id(base);
+
+	if (!backend.native_pointers)
+	{
+		if (ptr_chain)
+			SPIRV_CROSS_THROW("Backend does not support native pointers and does not support OpPtrAccessChain.");
+
+		// Wrapped buffer reference pointer types will need to poke into the internal "value" member before
+		// continuing the access chain.
+		if (should_dereference(base))
+		{
+			auto &type = get<SPIRType>(type_id);
+			expr = dereference_expression(type, expr);
+		}
+	}
+
+	const auto *type = &get_pointee_type(type_id);
+
+	bool access_chain_is_arrayed = expr.find_first_of('[') != string::npos;
+	bool row_major_matrix_needs_conversion = is_non_native_row_major_matrix(base);
+	bool is_packed = has_extended_decoration(base, SPIRVCrossDecorationPhysicalTypePacked);
+	uint32_t physical_type = get_extended_decoration(base, SPIRVCrossDecorationPhysicalTypeID);
+	bool is_invariant = has_decoration(base, DecorationInvariant);
+	bool relaxed_precision = has_decoration(base, DecorationRelaxedPrecision);
+	bool pending_array_enclose = false;
+	bool dimension_flatten = false;
+	bool access_meshlet_position_y = false;
+
+	if (auto *base_expr = maybe_get<SPIRExpression>(base))
+	{
+		access_meshlet_position_y = base_expr->access_meshlet_position_y;
+	}
+
+	// If we are translating access to a structured buffer, the first subscript '._m0' must be hidden
+	bool hide_first_subscript = count > 1 && is_user_type_structured(base);
+
+	const auto append_index = [&](uint32_t index, bool is_literal, bool is_ptr_chain = false) {
+		AccessChainFlags mod_flags = flags;
+		if (!is_literal)
+			mod_flags &= ~ACCESS_CHAIN_INDEX_IS_LITERAL_BIT;
+		if (!is_ptr_chain)
+			mod_flags &= ~ACCESS_CHAIN_PTR_CHAIN_BIT;
+		access_chain_internal_append_index(expr, base, type, mod_flags, access_chain_is_arrayed, index);
+		check_physical_type_cast(expr, type, physical_type);
+	};
+
+	for (uint32_t i = 0; i < count; i++)
+	{
+		uint32_t index = indices[i];
+
+		bool is_literal = index_is_literal;
+		if (is_literal && msb_is_id && (index >> 31u) != 0u)
+		{
+			is_literal = false;
+			index &= 0x7fffffffu;
+		}
+
+		// Pointer chains
+		if (ptr_chain && i == 0)
+		{
+			// If we are flattening multidimensional arrays, only create opening bracket on first
+			// array index.
+			if (options.flatten_multidimensional_arrays)
+			{
+				dimension_flatten = type->array.size() >= 1;
+				pending_array_enclose = dimension_flatten;
+				if (pending_array_enclose)
+					expr += "[";
+			}
+
+			if (options.flatten_multidimensional_arrays && dimension_flatten)
+			{
+				// If we are flattening multidimensional arrays, do manual stride computation.
+				if (is_literal)
+					expr += convert_to_string(index);
+				else
+					expr += to_enclosed_expression(index, register_expression_read);
+
+				for (auto j = uint32_t(type->array.size()); j; j--)
+				{
+					expr += " * ";
+					expr += enclose_expression(to_array_size(*type, j - 1));
+				}
+
+				if (type->array.empty())
+					pending_array_enclose = false;
+				else
+					expr += " + ";
+
+				if (!pending_array_enclose)
+					expr += "]";
+			}
+			else
+			{
+				append_index(index, is_literal, true);
+			}
+
+			if (type->basetype == SPIRType::ControlPointArray)
+			{
+				type_id = type->parent_type;
+				type = &get<SPIRType>(type_id);
+			}
+
+			access_chain_is_arrayed = true;
+		}
+		// Arrays
+		else if (!type->array.empty())
+		{
+			// If we are flattening multidimensional arrays, only create opening bracket on first
+			// array index.
+			if (options.flatten_multidimensional_arrays && !pending_array_enclose)
+			{
+				dimension_flatten = type->array.size() > 1;
+				pending_array_enclose = dimension_flatten;
+				if (pending_array_enclose)
+					expr += "[";
+			}
+
+			assert(type->parent_type);
+
+			auto *var = maybe_get<SPIRVariable>(base);
+			if (backend.force_gl_in_out_block && i == 0 && var && is_builtin_variable(*var) &&
+			    !has_decoration(type->self, DecorationBlock))
+			{
+				// This deals with scenarios for tesc/geom where arrays of gl_Position[] are declared.
+				// Normally, these variables live in blocks when compiled from GLSL,
+				// but HLSL seems to just emit straight arrays here.
+				// We must pretend this access goes through gl_in/gl_out arrays
+				// to be able to access certain builtins as arrays.
+				// Similar concerns apply for mesh shaders where we have to redirect to gl_MeshVerticesEXT or MeshPrimitivesEXT.
+				auto builtin = ir.meta[base].decoration.builtin_type;
+				bool mesh_shader = get_execution_model() == ExecutionModelMeshEXT;
+
+				switch (builtin)
+				{
+				case BuiltInCullDistance:
+				case BuiltInClipDistance:
+					if (type->array.size() == 1) // Red herring. Only consider block IO for two-dimensional arrays here.
+					{
+						append_index(index, is_literal);
+						break;
+					}
+					// fallthrough
+				case BuiltInPosition:
+				case BuiltInPointSize:
+					if (mesh_shader)
+						expr = join("gl_MeshVerticesEXT[", to_expression(index, register_expression_read), "].", expr);
+					else if (var->storage == StorageClassInput)
+						expr = join("gl_in[", to_expression(index, register_expression_read), "].", expr);
+					else if (var->storage == StorageClassOutput)
+						expr = join("gl_out[", to_expression(index, register_expression_read), "].", expr);
+					else
+						append_index(index, is_literal);
+					break;
+
+				case BuiltInPrimitiveId:
+				case BuiltInLayer:
+				case BuiltInViewportIndex:
+				case BuiltInCullPrimitiveEXT:
+				case BuiltInPrimitiveShadingRateKHR:
+					if (mesh_shader)
+						expr = join("gl_MeshPrimitivesEXT[", to_expression(index, register_expression_read), "].", expr);
+					else
+						append_index(index, is_literal);
+					break;
+
+				default:
+					append_index(index, is_literal);
+					break;
+				}
+			}
+			else if (backend.force_merged_mesh_block && i == 0 && var &&
+			         !is_builtin_variable(*var) && var->storage == StorageClassOutput)
+			{
+				if (is_per_primitive_variable(*var))
+					expr = join("gl_MeshPrimitivesEXT[", to_expression(index, register_expression_read), "].", expr);
+				else
+					expr = join("gl_MeshVerticesEXT[", to_expression(index, register_expression_read), "].", expr);
+			}
+			else if (options.flatten_multidimensional_arrays && dimension_flatten)
+			{
+				// If we are flattening multidimensional arrays, do manual stride computation.
+				auto &parent_type = get<SPIRType>(type->parent_type);
+
+				if (is_literal)
+					expr += convert_to_string(index);
+				else
+					expr += to_enclosed_expression(index, register_expression_read);
+
+				for (auto j = uint32_t(parent_type.array.size()); j; j--)
+				{
+					expr += " * ";
+					expr += enclose_expression(to_array_size(parent_type, j - 1));
+				}
+
+				if (parent_type.array.empty())
+					pending_array_enclose = false;
+				else
+					expr += " + ";
+
+				if (!pending_array_enclose)
+					expr += "]";
+			}
+			// Some builtins are arrays in SPIR-V but not in other languages, e.g. gl_SampleMask[] is an array in SPIR-V but not in Metal.
+			// By throwing away the index, we imply the index was 0, which it must be for gl_SampleMask.
+			else if (!builtin_translates_to_nonarray(BuiltIn(get_decoration(base, DecorationBuiltIn))))
+			{
+				append_index(index, is_literal);
+			}
+
+			if (var && has_decoration(var->self, DecorationBuiltIn) &&
+			    get_decoration(var->self, DecorationBuiltIn) == BuiltInPosition &&
+			    get_execution_model() == ExecutionModelMeshEXT)
+			{
+				access_meshlet_position_y = true;
+			}
+
+			type_id = type->parent_type;
+			type = &get<SPIRType>(type_id);
+
+			access_chain_is_arrayed = true;
+		}
+		// For structs, the index refers to a constant, which indexes into the members, possibly through a redirection mapping.
+		// We also check if this member is a builtin, since we then replace the entire expression with the builtin one.
+		else if (type->basetype == SPIRType::Struct)
+		{
+			if (!is_literal)
+				index = evaluate_constant_u32(index);
+
+			if (index < uint32_t(type->member_type_index_redirection.size()))
+				index = type->member_type_index_redirection[index];
+
+			if (index >= type->member_types.size())
+				SPIRV_CROSS_THROW("Member index is out of bounds!");
+
+			if (hide_first_subscript)
+			{
+				// First "._m0" subscript has been hidden, subsequent fields must be emitted even for structured buffers
+				hide_first_subscript = false;
+			}
+			else
+			{
+				BuiltIn builtin = BuiltInMax;
+				if (is_member_builtin(*type, index, &builtin) && access_chain_needs_stage_io_builtin_translation(base))
+				{
+					if (access_chain_is_arrayed)
+					{
+						expr += ".";
+						expr += builtin_to_glsl(builtin, type->storage);
+					}
+					else
+						expr = builtin_to_glsl(builtin, type->storage);
+
+					if (builtin == BuiltInPosition && get_execution_model() == ExecutionModelMeshEXT)
+					{
+						access_meshlet_position_y = true;
+					}
+				}
+				else
+				{
+					// If the member has a qualified name, use it as the entire chain
+					string qual_mbr_name = get_member_qualified_name(type_id, index);
+					if (!qual_mbr_name.empty())
+						expr = qual_mbr_name;
+					else if (flatten_member_reference)
+						expr += join("_", to_member_name(*type, index));
+					else
+					{
+						// Any pointer de-refences for values are handled in the first access chain.
+						// For pointer chains, the pointer-ness is resolved through an array access.
+						// The only time this is not true is when accessing array of SSBO/UBO.
+						// This case is explicitly handled.
+						expr += to_member_reference(base, *type, index, ptr_chain || i != 0);
+					}
+				}
+			}
+
+			if (has_member_decoration(type->self, index, DecorationInvariant))
+				is_invariant = true;
+			if (has_member_decoration(type->self, index, DecorationRelaxedPrecision))
+				relaxed_precision = true;
+
+			is_packed = member_is_packed_physical_type(*type, index);
+			if (member_is_remapped_physical_type(*type, index))
+				physical_type = get_extended_member_decoration(type->self, index, SPIRVCrossDecorationPhysicalTypeID);
+			else
+				physical_type = 0;
+
+			row_major_matrix_needs_conversion = member_is_non_native_row_major_matrix(*type, index);
+			type = &get<SPIRType>(type->member_types[index]);
+		}
+		// Matrix -> Vector
+		else if (type->columns > 1)
+		{
+			// If we have a row-major matrix here, we need to defer any transpose in case this access chain
+			// is used to store a column. We can resolve it right here and now if we access a scalar directly,
+			// by flipping indexing order of the matrix.
+
+			expr += "[";
+			if (is_literal)
+				expr += convert_to_string(index);
+			else
+				expr += to_unpacked_expression(index, register_expression_read);
+			expr += "]";
+
+			type_id = type->parent_type;
+			type = &get<SPIRType>(type_id);
+		}
+		// Vector -> Scalar
+		else if (type->vecsize > 1)
+		{
+			string deferred_index;
+			if (row_major_matrix_needs_conversion)
+			{
+				// Flip indexing order.
+				auto column_index = expr.find_last_of('[');
+				if (column_index != string::npos)
+				{
+					deferred_index = expr.substr(column_index);
+					expr.resize(column_index);
+				}
+			}
+
+			// Internally, access chain implementation can also be used on composites,
+			// ignore scalar access workarounds in this case.
+			StorageClass effective_storage = StorageClassGeneric;
+			bool ignore_potential_sliced_writes = false;
+			if ((flags & ACCESS_CHAIN_FORCE_COMPOSITE_BIT) == 0)
+			{
+				if (expression_type(base).pointer)
+					effective_storage = get_expression_effective_storage_class(base);
+
+				// Special consideration for control points.
+				// Control points can only be written by InvocationID, so there is no need
+				// to consider scalar access chains here.
+				// Cleans up some cases where it's very painful to determine the accurate storage class
+				// since blocks can be partially masked ...
+				auto *var = maybe_get_backing_variable(base);
+				if (var && var->storage == StorageClassOutput &&
+				    get_execution_model() == ExecutionModelTessellationControl &&
+				    !has_decoration(var->self, DecorationPatch))
+				{
+					ignore_potential_sliced_writes = true;
+				}
+			}
+			else
+				ignore_potential_sliced_writes = true;
+
+			if (!row_major_matrix_needs_conversion && !ignore_potential_sliced_writes)
+			{
+				// On some backends, we might not be able to safely access individual scalars in a vector.
+				// To work around this, we might have to cast the access chain reference to something which can,
+				// like a pointer to scalar, which we can then index into.
+				prepare_access_chain_for_scalar_access(expr, get<SPIRType>(type->parent_type), effective_storage,
+				                                       is_packed);
+			}
+
+			if (is_literal)
+			{
+				bool out_of_bounds = (index >= type->vecsize);
+
+				if (!is_packed && !row_major_matrix_needs_conversion)
+				{
+					expr += ".";
+					expr += index_to_swizzle(out_of_bounds ? 0 : index);
+				}
+				else
+				{
+					// For packed vectors, we can only access them as an array, not by swizzle.
+					expr += join("[", out_of_bounds ? 0 : index, "]");
+				}
+			}
+			else if (ir.ids[index].get_type() == TypeConstant && !is_packed && !row_major_matrix_needs_conversion)
+			{
+				auto &c = get<SPIRConstant>(index);
+				bool out_of_bounds = (c.scalar() >= type->vecsize);
+
+				if (c.specialization)
+				{
+					// If the index is a spec constant, we cannot turn extract into a swizzle.
+					expr += join("[", out_of_bounds ? "0" : to_expression(index), "]");
+				}
+				else
+				{
+					expr += ".";
+					expr += index_to_swizzle(out_of_bounds ? 0 : c.scalar());
+				}
+			}
+			else
+			{
+				expr += "[";
+				expr += to_unpacked_expression(index, register_expression_read);
+				expr += "]";
+			}
+
+			if (row_major_matrix_needs_conversion && !ignore_potential_sliced_writes)
+			{
+				prepare_access_chain_for_scalar_access(expr, get<SPIRType>(type->parent_type), effective_storage,
+				                                       is_packed);
+			}
+
+			if (access_meshlet_position_y)
+			{
+				if (is_literal)
+				{
+					access_meshlet_position_y = index == 1;
+				}
+				else
+				{
+					const auto *c = maybe_get<SPIRConstant>(index);
+					if (c)
+						access_meshlet_position_y = c->scalar() == 1;
+					else
+					{
+						// We don't know, but we have to assume no.
+						// Flip Y in mesh shaders is an opt-in horrible hack, so we'll have to assume shaders try to behave.
+						access_meshlet_position_y = false;
+					}
+				}
+			}
+
+			expr += deferred_index;
+			row_major_matrix_needs_conversion = false;
+
+			is_packed = false;
+			physical_type = 0;
+			type_id = type->parent_type;
+			type = &get<SPIRType>(type_id);
+		}
+		else if (!backend.allow_truncated_access_chain)
+			SPIRV_CROSS_THROW("Cannot subdivide a scalar value!");
+	}
+
+	if (pending_array_enclose)
+	{
+		SPIRV_CROSS_THROW("Flattening of multidimensional arrays were enabled, "
+		                  "but the access chain was terminated in the middle of a multidimensional array. "
+		                  "This is not supported.");
+	}
+
+	if (meta)
+	{
+		meta->need_transpose = row_major_matrix_needs_conversion;
+		meta->storage_is_packed = is_packed;
+		meta->storage_is_invariant = is_invariant;
+		meta->storage_physical_type = physical_type;
+		meta->relaxed_precision = relaxed_precision;
+		meta->access_meshlet_position_y = access_meshlet_position_y;
+	}
+
+	return expr;
+}
+
+bool CompilerMSL::is_per_primitive_variable(const SPIRVariable &var) const
+{
+	if (has_decoration(var.self, DecorationPerPrimitiveEXT))
+		return true;
+
+	auto &type = get<SPIRType>(var.basetype);
+	if (!has_decoration(type.self, DecorationBlock))
+		return false;
+
+	for (uint32_t i = 0, n = uint32_t(type.member_types.size()); i < n; i++)
+		if (!has_member_decoration(type.self, i, DecorationPerPrimitiveEXT))
+			return false;
+
+	return true;
+}
+
+bool CompilerMSL::is_user_type_structured(uint32_t /*id*/) const
+{
+	return false; // GLSL itself does not have structured user type, but HLSL does with StructuredBuffer and RWStructuredBuffer resources.
+}
+
+void CompilerMSL::access_chain_internal_append_index(std::string &expr, uint32_t /*base*/, const SPIRType * /*type*/,
+                                                      AccessChainFlags flags, bool &access_chain_is_arrayed,
+                                                      uint32_t index)
+{
+	bool index_is_literal = (flags & ACCESS_CHAIN_INDEX_IS_LITERAL_BIT) != 0;
+	bool ptr_chain = (flags & ACCESS_CHAIN_PTR_CHAIN_BIT) != 0;
+	bool register_expression_read = (flags & ACCESS_CHAIN_SKIP_REGISTER_EXPRESSION_READ_BIT) == 0;
+
+	string idx_expr = index_is_literal ? convert_to_string(index) : to_unpacked_expression(index, register_expression_read);
+
+	// For the case where the base of an OpPtrAccessChain already ends in [n],
+	// we need to use the index as an offset to the existing index, otherwise,
+	// we can just use the index directly.
+	if (ptr_chain && access_chain_is_arrayed)
+	{
+		size_t split_pos = expr.find_last_of(']');
+		string expr_front = expr.substr(0, split_pos);
+		string expr_back = expr.substr(split_pos);
+		expr = expr_front + " + " +  enclose_expression(idx_expr) + expr_back;
+	}
+	else
+	{
+		expr += "[";
+		expr += idx_expr;
+		expr += "]";
+	}
+}
+
+string CompilerMSL::access_chain(uint32_t base, const uint32_t *indices, uint32_t count, const SPIRType &target_type,
+                                  AccessChainMeta *meta, bool ptr_chain)
+{
+	if (flattened_buffer_blocks.count(base))
+	{
+		uint32_t matrix_stride = 0;
+		uint32_t array_stride = 0;
+		bool need_transpose = false;
+		flattened_access_chain_offset(expression_type(base), indices, count, 0, 16, &need_transpose, &matrix_stride,
+		                              &array_stride, ptr_chain);
+
+		if (meta)
+		{
+			meta->need_transpose = target_type.columns > 1 && need_transpose;
+			meta->storage_is_packed = false;
+		}
+
+		return flattened_access_chain(base, indices, count, target_type, 0, matrix_stride, array_stride,
+		                              need_transpose);
+	}
+	else if (flattened_structs.count(base) && count > 0)
+	{
+		AccessChainFlags flags = ACCESS_CHAIN_CHAIN_ONLY_BIT | ACCESS_CHAIN_SKIP_REGISTER_EXPRESSION_READ_BIT;
+		if (ptr_chain)
+			flags |= ACCESS_CHAIN_PTR_CHAIN_BIT;
+
+		if (flattened_structs[base])
+		{
+			flags |= ACCESS_CHAIN_FLATTEN_ALL_MEMBERS_BIT;
+			if (meta)
+				meta->flattened_struct = target_type.basetype == SPIRType::Struct;
+		}
+
+		auto chain = access_chain_internal(base, indices, count, flags, nullptr).substr(1);
+		if (meta)
+		{
+			meta->need_transpose = false;
+			meta->storage_is_packed = false;
+		}
+
+		auto basename = to_flattened_access_chain_expression(base);
+		auto ret = join(basename, "_", chain);
+		ParsedIR::sanitize_underscores(ret);
+		return ret;
+	}
+	else
+	{
+		AccessChainFlags flags = ACCESS_CHAIN_SKIP_REGISTER_EXPRESSION_READ_BIT;
+		if (ptr_chain)
+			flags |= ACCESS_CHAIN_PTR_CHAIN_BIT;
+		return access_chain_internal(base, indices, count, flags, meta);
+	}
+}
+
+std::pair<std::string, uint32_t> CompilerMSL::flattened_access_chain_offset(
+    const SPIRType &basetype, const uint32_t *indices, uint32_t count, uint32_t offset, uint32_t word_stride,
+    bool *need_transpose, uint32_t *out_matrix_stride, uint32_t *out_array_stride, bool ptr_chain)
+{
+	// Start traversing type hierarchy at the proper non-pointer types.
+	const auto *type = &get_pointee_type(basetype);
+
+	std::string expr;
+
+	// Inherit matrix information in case we are access chaining a vector which might have come from a row major layout.
+	bool row_major_matrix_needs_conversion = need_transpose ? *need_transpose : false;
+	uint32_t matrix_stride = out_matrix_stride ? *out_matrix_stride : 0;
+	uint32_t array_stride = out_array_stride ? *out_array_stride : 0;
+
+	for (uint32_t i = 0; i < count; i++)
+	{
+		uint32_t index = indices[i];
+
+		// Pointers
+		if (ptr_chain && i == 0)
+		{
+			// Here, the pointer type will be decorated with an array stride.
+			array_stride = get_decoration(basetype.self, DecorationArrayStride);
+			if (!array_stride)
+				SPIRV_CROSS_THROW("SPIR-V does not define ArrayStride for buffer block.");
+
+			auto *constant = maybe_get<SPIRConstant>(index);
+			if (constant)
+			{
+				// Constant array access.
+				offset += constant->scalar() * array_stride;
+			}
+			else
+			{
+				// Dynamic array access.
+				if (array_stride % word_stride)
+				{
+					SPIRV_CROSS_THROW("Array stride for dynamic indexing must be divisible by the size "
+					                  "of a 4-component vector. "
+					                  "Likely culprit here is a float or vec2 array inside a push "
+					                  "constant block which is std430. "
+					                  "This cannot be flattened. Try using std140 layout instead.");
+				}
+
+				expr += to_enclosed_expression(index);
+				expr += " * ";
+				expr += convert_to_string(array_stride / word_stride);
+				expr += " + ";
+			}
+		}
+		// Arrays
+		else if (!type->array.empty())
+		{
+			auto *constant = maybe_get<SPIRConstant>(index);
+			if (constant)
+			{
+				// Constant array access.
+				offset += constant->scalar() * array_stride;
+			}
+			else
+			{
+				// Dynamic array access.
+				if (array_stride % word_stride)
+				{
+					SPIRV_CROSS_THROW("Array stride for dynamic indexing must be divisible by the size "
+					                  "of a 4-component vector. "
+					                  "Likely culprit here is a float or vec2 array inside a push "
+					                  "constant block which is std430. "
+					                  "This cannot be flattened. Try using std140 layout instead.");
+				}
+
+				expr += to_enclosed_expression(index, false);
+				expr += " * ";
+				expr += convert_to_string(array_stride / word_stride);
+				expr += " + ";
+			}
+
+			uint32_t parent_type = type->parent_type;
+			type = &get<SPIRType>(parent_type);
+
+			if (!type->array.empty())
+				array_stride = get_decoration(parent_type, DecorationArrayStride);
+		}
+		// For structs, the index refers to a constant, which indexes into the members.
+		// We also check if this member is a builtin, since we then replace the entire expression with the builtin one.
+		else if (type->basetype == SPIRType::Struct)
+		{
+			index = evaluate_constant_u32(index);
+
+			if (index >= type->member_types.size())
+				SPIRV_CROSS_THROW("Member index is out of bounds!");
+
+			offset += type_struct_member_offset(*type, index);
+
+			auto &struct_type = *type;
+			type = &get<SPIRType>(type->member_types[index]);
+
+			if (type->columns > 1)
+			{
+				matrix_stride = type_struct_member_matrix_stride(struct_type, index);
+				row_major_matrix_needs_conversion =
+				    combined_decoration_for_member(struct_type, index).get(DecorationRowMajor);
+			}
+			else
+				row_major_matrix_needs_conversion = false;
+
+			if (!type->array.empty())
+				array_stride = type_struct_member_array_stride(struct_type, index);
+		}
+		// Matrix -> Vector
+		else if (type->columns > 1)
+		{
+			auto *constant = maybe_get<SPIRConstant>(index);
+			if (constant)
+			{
+				index = evaluate_constant_u32(index);
+				offset += index * (row_major_matrix_needs_conversion ? (type->width / 8) : matrix_stride);
+			}
+			else
+			{
+				uint32_t indexing_stride = row_major_matrix_needs_conversion ? (type->width / 8) : matrix_stride;
+				// Dynamic array access.
+				if (indexing_stride % word_stride)
+				{
+					SPIRV_CROSS_THROW("Matrix stride for dynamic indexing must be divisible by the size of a "
+					                  "4-component vector. "
+					                  "Likely culprit here is a row-major matrix being accessed dynamically. "
+					                  "This cannot be flattened. Try using std140 layout instead.");
+				}
+
+				expr += to_enclosed_expression(index, false);
+				expr += " * ";
+				expr += convert_to_string(indexing_stride / word_stride);
+				expr += " + ";
+			}
+
+			type = &get<SPIRType>(type->parent_type);
+		}
+		// Vector -> Scalar
+		else if (type->vecsize > 1)
+		{
+			auto *constant = maybe_get<SPIRConstant>(index);
+			if (constant)
+			{
+				index = evaluate_constant_u32(index);
+				offset += index * (row_major_matrix_needs_conversion ? matrix_stride : (type->width / 8));
+			}
+			else
+			{
+				uint32_t indexing_stride = row_major_matrix_needs_conversion ? matrix_stride : (type->width / 8);
+
+				// Dynamic array access.
+				if (indexing_stride % word_stride)
+				{
+					SPIRV_CROSS_THROW("Stride for dynamic vector indexing must be divisible by the "
+					                  "size of a 4-component vector. "
+					                  "This cannot be flattened in legacy targets.");
+				}
+
+				expr += to_enclosed_expression(index, false);
+				expr += " * ";
+				expr += convert_to_string(indexing_stride / word_stride);
+				expr += " + ";
+			}
+
+			type = &get<SPIRType>(type->parent_type);
+		}
+		else
+			SPIRV_CROSS_THROW("Cannot subdivide a scalar value!");
+	}
+
+	if (need_transpose)
+		*need_transpose = row_major_matrix_needs_conversion;
+	if (out_matrix_stride)
+		*out_matrix_stride = matrix_stride;
+	if (out_array_stride)
+		*out_array_stride = array_stride;
+
+	return std::make_pair(expr, offset);
+}
+
+std::string CompilerMSL::flattened_access_chain(uint32_t base, const uint32_t *indices, uint32_t count,
+                                                 const SPIRType &target_type, uint32_t offset, uint32_t matrix_stride,
+                                                 uint32_t /* array_stride */, bool need_transpose)
+{
+	if (!target_type.array.empty())
+		SPIRV_CROSS_THROW("Access chains that result in an array can not be flattened");
+	else if (target_type.basetype == SPIRType::Struct)
+		return flattened_access_chain_struct(base, indices, count, target_type, offset);
+	else if (target_type.columns > 1)
+		return flattened_access_chain_matrix(base, indices, count, target_type, offset, matrix_stride, need_transpose);
+	else
+		return flattened_access_chain_vector(base, indices, count, target_type, offset, matrix_stride, need_transpose);
+}
+
+std::string CompilerMSL::flattened_access_chain_struct(uint32_t base, const uint32_t *indices, uint32_t count,
+                                                        const SPIRType &target_type, uint32_t offset)
+{
+	std::string expr;
+
+	if (backend.can_declare_struct_inline)
+	{
+		expr += type_to_glsl_constructor(target_type);
+		expr += "(";
+	}
+	else
+		expr += "{";
+
+	for (uint32_t i = 0; i < uint32_t(target_type.member_types.size()); ++i)
+	{
+		if (i != 0)
+			expr += ", ";
+
+		const SPIRType &member_type = get<SPIRType>(target_type.member_types[i]);
+		uint32_t member_offset = type_struct_member_offset(target_type, i);
+
+		// The access chain terminates at the struct, so we need to find matrix strides and row-major information
+		// ahead of time.
+		bool need_transpose = false;
+		bool relaxed = false;
+		uint32_t matrix_stride = 0;
+		if (member_type.columns > 1)
+		{
+			auto decorations = combined_decoration_for_member(target_type, i);
+			need_transpose = decorations.get(DecorationRowMajor);
+			relaxed = decorations.get(DecorationRelaxedPrecision);
+			matrix_stride = type_struct_member_matrix_stride(target_type, i);
+		}
+
+		auto tmp = flattened_access_chain(base, indices, count, member_type, offset + member_offset, matrix_stride,
+		                                  0 /* array_stride */, need_transpose);
+
+		// Cannot forward transpositions, so resolve them here.
+		if (need_transpose)
+			expr += convert_row_major_matrix(tmp, member_type, 0, false, relaxed);
+		else
+			expr += tmp;
+	}
+
+	expr += backend.can_declare_struct_inline ? ")" : "}";
+
+	return expr;
+}
+
+std::string CompilerMSL::flattened_access_chain_matrix(uint32_t base, const uint32_t *indices, uint32_t count,
+                                                        const SPIRType &target_type, uint32_t offset,
+                                                        uint32_t matrix_stride, bool need_transpose)
+{
+	assert(matrix_stride);
+	SPIRType tmp_type = target_type;
+	if (need_transpose)
+		swap(tmp_type.vecsize, tmp_type.columns);
+
+	std::string expr;
+
+	expr += type_to_glsl_constructor(tmp_type);
+	expr += "(";
+
+	for (uint32_t i = 0; i < tmp_type.columns; i++)
+	{
+		if (i != 0)
+			expr += ", ";
+
+		expr += flattened_access_chain_vector(base, indices, count, tmp_type, offset + i * matrix_stride, matrix_stride,
+		                                      /* need_transpose= */ false);
+	}
+
+	expr += ")";
+
+	return expr;
+}
+
+std::string CompilerMSL::flattened_access_chain_vector(uint32_t base, const uint32_t *indices, uint32_t count,
+                                                        const SPIRType &target_type, uint32_t offset,
+                                                        uint32_t matrix_stride, bool need_transpose)
+{
+	auto result = flattened_access_chain_offset(expression_type(base), indices, count, offset, 16);
+
+	auto buffer_name = to_name(expression_type(base).self);
+
+	if (need_transpose)
+	{
+		std::string expr;
+
+		if (target_type.vecsize > 1)
+		{
+			expr += type_to_glsl_constructor(target_type);
+			expr += "(";
+		}
+
+		for (uint32_t i = 0; i < target_type.vecsize; ++i)
+		{
+			if (i != 0)
+				expr += ", ";
+
+			uint32_t component_offset = result.second + i * matrix_stride;
+
+			assert(component_offset % (target_type.width / 8) == 0);
+			uint32_t index = component_offset / (target_type.width / 8);
+
+			expr += buffer_name;
+			expr += "[";
+			expr += result.first; // this is a series of N1 * k1 + N2 * k2 + ... that is either empty or ends with a +
+			expr += convert_to_string(index / 4);
+			expr += "]";
+
+			expr += vector_swizzle(1, index % 4);
+		}
+
+		if (target_type.vecsize > 1)
+		{
+			expr += ")";
+		}
+
+		return expr;
+	}
+	else
+	{
+		assert(result.second % (target_type.width / 8) == 0);
+		uint32_t index = result.second / (target_type.width / 8);
+
+		std::string expr;
+
+		expr += buffer_name;
+		expr += "[";
+		expr += result.first; // this is a series of N1 * k1 + N2 * k2 + ... that is either empty or ends with a +
+		expr += convert_to_string(index / 4);
+		expr += "]";
+
+		expr += vector_swizzle(target_type.vecsize, index % 4);
+
+		return expr;
+	}
+}
+
+std::string CompilerMSL::to_flattened_access_chain_expression(uint32_t id)
+{
+	// Do not use to_expression as that will unflatten access chains.
+	string basename;
+	if (const auto *var = maybe_get<SPIRVariable>(id))
+		basename = to_name(var->self);
+	else if (const auto *expr = maybe_get<SPIRExpression>(id))
+		basename = expr->expression;
+	else
+		basename = to_expression(id);
+
+	return basename;
+}
+
+Op CompilerMSL::get_remapped_spirv_op(Op op) const
+{
+	if (options.relax_nan_checks)
+	{
+		switch (op)
+		{
+		case OpFUnordLessThan:
+			op = OpFOrdLessThan;
+			break;
+		case OpFUnordLessThanEqual:
+			op = OpFOrdLessThanEqual;
+			break;
+		case OpFUnordGreaterThan:
+			op = OpFOrdGreaterThan;
+			break;
+		case OpFUnordGreaterThanEqual:
+			op = OpFOrdGreaterThanEqual;
+			break;
+		case OpFUnordEqual:
+			op = OpFOrdEqual;
+			break;
+		case OpFOrdNotEqual:
+			op = OpFUnordNotEqual;
+			break;
+
+		default:
+			break;
+		}
+	}
+
+	return op;
+}
+
+uint32_t CompilerMSL::get_integer_width_for_instruction(const Instruction &instr) const
+{
+	if (instr.length < 3)
+		return 32;
+
+	auto *ops = stream(instr);
+
+	switch (instr.op)
+	{
+	case OpSConvert:
+	case OpConvertSToF:
+	case OpUConvert:
+	case OpConvertUToF:
+	case OpIEqual:
+	case OpINotEqual:
+	case OpSLessThan:
+	case OpSLessThanEqual:
+	case OpSGreaterThan:
+	case OpSGreaterThanEqual:
+	case OpULessThan:
+	case OpULessThanEqual:
+	case OpUGreaterThan:
+	case OpUGreaterThanEqual:
+		return expression_type(ops[2]).width;
+
+	default:
+	{
+		// We can look at result type which is more robust.
+		auto *type = maybe_get<SPIRType>(ops[0]);
+		if (type && type_is_integral(*type))
+			return type->width;
+		else
+			return 32;
+	}
+	}
+}
+
+void CompilerMSL::emit_binary_op_cast(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1,
+                                       const char *op, SPIRType::BaseType input_type,
+                                       bool skip_cast_if_equal_type,
+                                       bool implicit_integer_promotion)
+{
+	string cast_op0, cast_op1;
+	auto expected_type = binary_op_bitcast_helper(cast_op0, cast_op1, input_type, op0, op1, skip_cast_if_equal_type);
+	auto &out_type = get<SPIRType>(result_type);
+
+	// We might have casted away from the result type, so bitcast again.
+	// For example, arithmetic right shift with uint inputs.
+	// Special case boolean outputs since relational opcodes output booleans instead of int/uint.
+	auto bitop = join(cast_op0, " ", op, " ", cast_op1);
+	string expr;
+
+	if (implicit_integer_promotion)
+	{
+		// Simple value cast.
+		expr = join(type_to_glsl(out_type), '(', bitop, ')');
+	}
+	else if (out_type.basetype != input_type && out_type.basetype != SPIRType::Boolean)
+	{
+		expected_type.basetype = input_type;
+		expr = join(bitcast_glsl_op(out_type, expected_type), '(', bitop, ')');
+	}
+	else
+	{
+		expr = std::move(bitop);
+	}
+
+	emit_op(result_type, result_id, expr, should_forward(op0) && should_forward(op1));
+	inherit_expression_dependencies(result_id, op0);
+	inherit_expression_dependencies(result_id, op1);
+}
+
+void CompilerMSL::emit_binary_op(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1, const char *op)
+{
+	// Various FP arithmetic opcodes such as add, sub, mul will hit this.
+	bool force_temporary_precise = backend.support_precise_qualifier &&
+	                               has_decoration(result_id, DecorationNoContraction) &&
+	                               type_is_floating_point(get<SPIRType>(result_type));
+	bool forward = should_forward(op0) && should_forward(op1) && !force_temporary_precise;
+
+	emit_op(result_type, result_id,
+	        join(to_enclosed_unpacked_expression(op0), " ", op, " ", to_enclosed_unpacked_expression(op1)), forward);
+
+	inherit_expression_dependencies(result_id, op0);
+	inherit_expression_dependencies(result_id, op1);
+}
+
+void CompilerMSL::emit_unary_func_op(uint32_t result_type, uint32_t result_id, uint32_t op0, const char *op)
+{
+	bool forward = should_forward(op0);
+	emit_op(result_type, result_id, join(op, "(", to_unpacked_expression(op0), ")"), forward);
+	inherit_expression_dependencies(result_id, op0);
+}
+
+void CompilerMSL::register_control_dependent_expression(uint32_t expr)
+{
+	if (forwarded_temporaries.find(expr) == end(forwarded_temporaries))
+		return;
+
+	assert(current_emitting_block);
+	current_emitting_block->invalidate_expressions.push_back(expr);
+}
+
+void CompilerMSL::emit_bitfield_insert_op(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1,
+                                           uint32_t op2, uint32_t op3, const char *op,
+                                           SPIRType::BaseType offset_count_type)
+{
+	// Only need to cast offset/count arguments. Types of base/insert must be same as result type,
+	// and bitfieldInsert is sign invariant.
+	bool forward = should_forward(op0) && should_forward(op1) && should_forward(op2) && should_forward(op3);
+
+	auto op0_expr = to_unpacked_expression(op0);
+	auto op1_expr = to_unpacked_expression(op1);
+	auto op2_expr = to_unpacked_expression(op2);
+	auto op3_expr = to_unpacked_expression(op3);
+
+	SPIRType target_type;
+	target_type.vecsize = 1;
+	target_type.basetype = offset_count_type;
+
+	if (expression_type(op2).basetype != offset_count_type)
+	{
+		// Value-cast here. Input might be 16-bit. GLSL requires int.
+		op2_expr = join(type_to_glsl_constructor(target_type), "(", op2_expr, ")");
+	}
+
+	if (expression_type(op3).basetype != offset_count_type)
+	{
+		// Value-cast here. Input might be 16-bit. GLSL requires int.
+		op3_expr = join(type_to_glsl_constructor(target_type), "(", op3_expr, ")");
+	}
+
+	emit_op(result_type, result_id, join(op, "(", op0_expr, ", ", op1_expr, ", ", op2_expr, ", ", op3_expr, ")"),
+	        forward);
+
+	inherit_expression_dependencies(result_id, op0);
+	inherit_expression_dependencies(result_id, op1);
+	inherit_expression_dependencies(result_id, op2);
+	inherit_expression_dependencies(result_id, op3);
+}
+
+// Very special case. Handling bitfieldExtract requires us to deal with different bitcasts of different signs
+// and different vector sizes all at once. Need a special purpose method here.
+void CompilerMSL::emit_trinary_func_op_bitextract(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1,
+                                                   uint32_t op2, const char *op,
+                                                   SPIRType::BaseType expected_result_type,
+                                                   SPIRType::BaseType input_type0, SPIRType::BaseType input_type1,
+                                                   SPIRType::BaseType input_type2)
+{
+	auto &out_type = get<SPIRType>(result_type);
+	auto expected_type = out_type;
+	expected_type.basetype = input_type0;
+
+	string cast_op0 =
+	    expression_type(op0).basetype != input_type0 ? bitcast_glsl(expected_type, op0) : to_unpacked_expression(op0);
+
+	auto op1_expr = to_unpacked_expression(op1);
+	auto op2_expr = to_unpacked_expression(op2);
+
+	// Use value casts here instead. Input must be exactly int or uint, but SPIR-V might be 16-bit.
+	expected_type.basetype = input_type1;
+	expected_type.vecsize = 1;
+	string cast_op1 = expression_type(op1).basetype != input_type1 ?
+	                      join(type_to_glsl_constructor(expected_type), "(", op1_expr, ")") :
+	                      op1_expr;
+
+	expected_type.basetype = input_type2;
+	expected_type.vecsize = 1;
+	string cast_op2 = expression_type(op2).basetype != input_type2 ?
+	                      join(type_to_glsl_constructor(expected_type), "(", op2_expr, ")") :
+	                      op2_expr;
+
+	string expr;
+	if (out_type.basetype != expected_result_type)
+	{
+		expected_type.vecsize = out_type.vecsize;
+		expected_type.basetype = expected_result_type;
+		expr = bitcast_glsl_op(out_type, expected_type);
+		expr += '(';
+		expr += join(op, "(", cast_op0, ", ", cast_op1, ", ", cast_op2, ")");
+		expr += ')';
+	}
+	else
+	{
+		expr += join(op, "(", cast_op0, ", ", cast_op1, ", ", cast_op2, ")");
+	}
+
+	emit_op(result_type, result_id, expr, should_forward(op0) && should_forward(op1) && should_forward(op2));
+	inherit_expression_dependencies(result_id, op0);
+	inherit_expression_dependencies(result_id, op1);
+	inherit_expression_dependencies(result_id, op2);
+}
+
+string CompilerMSL::bitcast_glsl(const SPIRType &result_type, uint32_t argument)
+{
+	auto op = bitcast_glsl_op(result_type, expression_type(argument));
+	if (op.empty())
+		return to_enclosed_unpacked_expression(argument);
+	else
+		return join(op, "(", to_unpacked_expression(argument), ")");
+}
+
+void CompilerMSL::emit_unary_func_op_cast(uint32_t result_type, uint32_t result_id, uint32_t op0, const char *op,
+                                           SPIRType::BaseType input_type, SPIRType::BaseType expected_result_type)
+{
+	auto &out_type = get<SPIRType>(result_type);
+	auto &expr_type = expression_type(op0);
+	auto expected_type = out_type;
+
+	// Bit-widths might be different in unary cases because we use it for SConvert/UConvert and friends.
+	expected_type.basetype = input_type;
+	expected_type.width = expr_type.width;
+
+	string cast_op;
+	if (expr_type.basetype != input_type)
+	{
+		if (expr_type.basetype == SPIRType::Boolean)
+			cast_op = join(type_to_glsl(expected_type), "(", to_unpacked_expression(op0), ")");
+		else
+			cast_op = bitcast_glsl(expected_type, op0);
+	}
+	else
+		cast_op = to_unpacked_expression(op0);
+
+	string expr;
+	if (out_type.basetype != expected_result_type)
+	{
+		expected_type.basetype = expected_result_type;
+		expected_type.width = out_type.width;
+		if (out_type.basetype == SPIRType::Boolean)
+			expr = type_to_glsl(out_type);
+		else
+			expr = bitcast_glsl_op(out_type, expected_type);
+		expr += '(';
+		expr += join(op, "(", cast_op, ")");
+		expr += ')';
+	}
+	else
+	{
+		expr += join(op, "(", cast_op, ")");
+	}
+
+	emit_op(result_type, result_id, expr, should_forward(op0));
+	inherit_expression_dependencies(result_id, op0);
+}
+
+void CompilerMSL::emit_binary_func_op(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1,
+                                       const char *op)
+{
+	// Opaque types (e.g. OpTypeSampledImage) must always be forwarded in GLSL
+	const auto &type = get_type(result_type);
+	bool must_forward = type_is_opaque_value(type);
+	bool forward = must_forward || (should_forward(op0) && should_forward(op1));
+	emit_op(result_type, result_id, join(op, "(", to_unpacked_expression(op0), ", ", to_unpacked_expression(op1), ")"),
+	        forward);
+	inherit_expression_dependencies(result_id, op0);
+	inherit_expression_dependencies(result_id, op1);
+}
+
+
+SPIRExpression &CompilerMSL::emit_uninitialized_temporary_expression(uint32_t type, uint32_t id)
+{
+	forced_temporaries.insert(id);
+	emit_uninitialized_temporary(type, id);
+	return set<SPIRExpression>(id, to_name(id), type, true);
+}
+
+void CompilerMSL::emit_uninitialized_temporary(uint32_t result_type, uint32_t result_id)
+{
+	// If we're declaring temporaries inside continue blocks,
+	// we must declare the temporary in the loop header so that the continue block can avoid declaring new variables.
+	if (!block_temporary_hoisting && current_continue_block && !hoisted_temporaries.count(result_id))
+	{
+		auto &header = get<SPIRBlock>(current_continue_block->loop_dominator);
+		if (find_if(begin(header.declare_temporary), end(header.declare_temporary),
+		            [result_type, result_id](const pair<uint32_t, uint32_t> &tmp) {
+			            return tmp.first == result_type && tmp.second == result_id;
+		            }) == end(header.declare_temporary))
+		{
+			header.declare_temporary.emplace_back(result_type, result_id);
+			hoisted_temporaries.insert(result_id);
+			force_recompile();
+		}
+	}
+	else if (hoisted_temporaries.count(result_id) == 0)
+	{
+		auto &type = get<SPIRType>(result_type);
+		auto &flags = get_decoration_bitset(result_id);
+
+		// The result_id has not been made into an expression yet, so use flags interface.
+		add_local_variable_name(result_id);
+
+		string initializer;
+		if (options.force_zero_initialized_variables && type_can_zero_initialize(type))
+			initializer = join(" = ", to_zero_initialized_expression(result_type));
+
+		statement(flags_to_qualifiers_glsl(type, flags), variable_decl(type, to_name(result_id)), initializer, ";");
+	}
+}
+
+bool CompilerMSL::type_can_zero_initialize(const SPIRType &type) const
+{
+	if (type.pointer)
+		return false;
+
+	if (!type.array.empty() && options.flatten_multidimensional_arrays)
+		return false;
+
+	for (auto &literal : type.array_size_literal)
+		if (!literal)
+			return false;
+
+	for (auto &memb : type.member_types)
+		if (!type_can_zero_initialize(get<SPIRType>(memb)))
+			return false;
+
+	return true;
+}
+
+SPIRType CompilerMSL::binary_op_bitcast_helper(string &cast_op0, string &cast_op1, SPIRType::BaseType &input_type,
+                                                uint32_t op0, uint32_t op1, bool skip_cast_if_equal_type)
+{
+	auto &type0 = expression_type(op0);
+	auto &type1 = expression_type(op1);
+
+	// We have to bitcast if our inputs are of different type, or if our types are not equal to expected inputs.
+	// For some functions like OpIEqual and INotEqual, we don't care if inputs are of different types than expected
+	// since equality test is exactly the same.
+	bool cast = (type0.basetype != type1.basetype) || (!skip_cast_if_equal_type && type0.basetype != input_type);
+
+	// Create a fake type so we can bitcast to it.
+	// We only deal with regular arithmetic types here like int, uints and so on.
+	SPIRType expected_type;
+	expected_type.basetype = input_type;
+	expected_type.vecsize = type0.vecsize;
+	expected_type.columns = type0.columns;
+	expected_type.width = type0.width;
+
+	if (cast)
+	{
+		cast_op0 = bitcast_glsl(expected_type, op0);
+		cast_op1 = bitcast_glsl(expected_type, op1);
+	}
+	else
+	{
+		// If we don't cast, our actual input type is that of the first (or second) argument.
+		cast_op0 = to_enclosed_unpacked_expression(op0);
+		cast_op1 = to_enclosed_unpacked_expression(op1);
+		input_type = type0.basetype;
+	}
+
+	return expected_type;
+}
+
+void CompilerMSL::flush_variable_declaration(uint32_t id)
+{
+	// Ensure that we declare phi-variable copies even if the original declaration isn't deferred
+	auto *var = maybe_get<SPIRVariable>(id);
+	if (var && var->deferred_declaration)
+	{
+		string initializer;
+		if (options.force_zero_initialized_variables &&
+		    (var->storage == StorageClassFunction || var->storage == StorageClassGeneric ||
+		     var->storage == StorageClassPrivate) &&
+		    !var->initializer && type_can_zero_initialize(get_variable_data_type(*var)))
+		{
+			initializer = join(" = ", to_zero_initialized_expression(get_variable_data_type_id(*var)));
+		}
+
+		statement(variable_decl_function_local(*var), initializer, ";");
+		var->deferred_declaration = false;
+	}
+	if (var)
+	{
+		emit_variable_temporary_copies(*var);
+	}
+}
