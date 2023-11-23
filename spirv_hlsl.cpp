@@ -10795,10 +10795,6 @@ void CompilerHLSL::prepare_access_chain_for_scalar_access(std::string &, const S
 {
 }
 
-#ifndef SPIRV_CROSS_TINY
-
-#endif
-
 StorageClass CompilerHLSL::get_expression_effective_storage_class(uint32_t ptr)
 {
 	auto *var = maybe_get_backing_variable(ptr);
