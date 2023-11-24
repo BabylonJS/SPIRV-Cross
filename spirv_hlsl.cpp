@@ -19623,24 +19623,25 @@ void CompilerHLSL::emit_spv_amd_gcn_shader_op(uint32_t result_type, uint32_t id,
 CompilerHLSL::ShaderSubgroupSupportHelper::Result::Result()
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 string CompilerHLSL::image_type_hlsl_legacy(const SPIRType &, uint32_t /*id*/)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 string CompilerHLSL::image_type_hlsl(const SPIRType &, uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 std::string CompilerHLSL::to_initializer_expression(const SPIRVariable &)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_interface_block_member_in_struct(const SPIRVariable &, uint32_t ,
@@ -19648,227 +19649,252 @@ void CompilerHLSL::emit_interface_block_member_in_struct(const SPIRVariable &, u
                                                          std::unordered_set<uint32_t> &)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::set_hlsl_aux_buffer_binding(HLSLAuxBinding, uint32_t, uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::unset_hlsl_aux_buffer_binding(HLSLAuxBinding)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 bool CompilerHLSL::is_hlsl_aux_buffer_binding_used(HLSLAuxBinding) const
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return false;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::analyze_meshlet_writes()
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::analyze_meshlet_writes(uint32_t, uint32_t, uint32_t,
                                           std::unordered_set<uint32_t> &)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_rayquery_function(const char *, const char *, const uint32_t *)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_mesh_tasks(SPIRBlock &)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_push_constant_block(const SPIRVariable &)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_legacy_uniform(const SPIRVariable &)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 string CompilerHLSL::bitcast_glsl_op(const SPIRType &, const SPIRType &)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::read_access_chain_array(const string &, const SPIRAccessChain &)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::read_access_chain_struct(const string &, const SPIRAccessChain &)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::read_access_chain(string *, const string &, const SPIRAccessChain &)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::write_access_chain_array(const SPIRAccessChain &, uint32_t,
                                             const SmallVector<uint32_t> &)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::write_access_chain_struct(const SPIRAccessChain &, uint32_t,
                                              const SmallVector<uint32_t> &)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 string CompilerHLSL::write_access_chain_value(uint32_t, const SmallVector<uint32_t> &,
                                               bool)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::write_access_chain(const SPIRAccessChain &, uint32_t ,
                                       const SmallVector<uint32_t> &)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_atomic(const uint32_t *, uint32_t , spv::Op )
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_subgroup_op(const Instruction &)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::require_texture_query_variant(uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 VariableID CompilerHLSL::remap_num_workgroups_builtin()
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return 0;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::set_resource_binding_flags(HLSLBindingFlags)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 string CompilerHLSL::get_unique_identifier()
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::add_hlsl_resource_binding(const HLSLResourceBinding &)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 bool CompilerHLSL::is_hlsl_resource_binding_used(ExecutionModel, uint32_t, uint32_t) const
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return false;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 CompilerHLSL::BitcastType CompilerHLSL::get_bitcast_type(uint32_t, uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return TypeNormal;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 bool CompilerHLSL::is_hlsl_force_storage_buffer_as_uav(ID) const
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return false;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::set_hlsl_force_storage_buffer_as_uav(uint32_t, uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 string CompilerHLSL::constant_op_expression(const SPIRConstantOp &)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 bool CompilerHLSL::type_can_zero_initialize(const SPIRType &) const
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return false;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 string CompilerHLSL::to_zero_initialized_expression(uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::fixup_implicit_builtin_block_names(ExecutionModel)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 uint32_t CompilerHLSL::get_declared_member_location(const SPIRVariable &, uint32_t, bool) const
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return 0;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 bool CompilerHLSL::variable_is_lut(const SPIRVariable &) const
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return false;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_buffer_block_flattened(const SPIRVariable &)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 string CompilerHLSL::to_combined_image_sampler(VariableID , VariableID)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 string CompilerHLSL::to_extract_component_expression(uint32_t, uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_emulated_ahyper_op(uint32_t, uint32_t, uint32_t, GLSLstd450)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::convert_non_uniform_expression(string &, uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 SPIRExpression &CompilerHLSL::emit_uninitialized_temporary_expression(uint32_t type, uint32_t id)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return SPIRExpression("", 0, false);
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 std::pair<std::string, uint32_t> CompilerHLSL::flattened_access_chain_offset(
@@ -19876,117 +19902,117 @@ std::pair<std::string, uint32_t> CompilerHLSL::flattened_access_chain_offset(
     bool *, uint32_t *, uint32_t *, bool )
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return std::make_pair("", 0);
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 std::string CompilerHLSL::bitcast_expression(SPIRType::BaseType, uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 std::string CompilerHLSL::bitcast_expression(const SPIRType &, SPIRType::BaseType,
                                              const std::string &)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_unrolled_unary_op(uint32_t, uint32_t, uint32_t, const char *)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_unrolled_binary_op(uint32_t, uint32_t, uint32_t, uint32_t,
                                            const char *, bool, SPIRType::BaseType)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 uint32_t CompilerHLSL::mask_relevant_memory_semantics(uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return 0;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 const Instruction *CompilerHLSL::get_next_instruction_in_block(const Instruction &instr)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	// FIXME: This is kind of hacky. There should be a cleaner way.
-	auto offset = uint32_t(&instr - current_emitting_block->ops.data());
-	if ((offset + 1) < current_emitting_block->ops.size())
-		return &current_emitting_block->ops[offset + 1];
-	else
-		return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_line_directive(uint32_t, uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_while_loop_initializers(const SPIRBlock &)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
-
 
 string CompilerHLSL::address_of_expression(const std::string &)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 bool CompilerHLSL::emit_array_copy(const char *, uint32_t , uint32_t , StorageClass, StorageClass)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return false;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::analyze_precision_requirements(uint32_t, uint32_t, uint32_t *, uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 CompilerHLSL::OptionsGLSL::Precision CompilerHLSL::analyze_expression_precision(const uint32_t *, uint32_t) const
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return CompilerHLSL::OptionsGLSL::Precision::DontCare;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 uint32_t CompilerHLSL::consume_temporary_in_precision_context(uint32_t type_id, uint32_t id, OptionsGLSL::Precision precision)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return 0;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::forward_relaxed_precision(uint32_t, const uint32_t *, uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
-
 
 string CompilerHLSL::convert_half_to_string(const SPIRConstant &, uint32_t, uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 std::string CompilerHLSL::convert_double_to_string(const SPIRConstant &, uint32_t, uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::require_extension_internal(const string &)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 bool CompilerHLSL::has_extension(const std::string &) const
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return false;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 // Wraps the expression string in a function call that converts the
@@ -19997,90 +20023,94 @@ string CompilerHLSL::convert_row_major_matrix(string, const SPIRType &, uint32_t
                                               bool /*is_packed*/, bool)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::require_polyfill(Polyfill, bool)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 string CompilerHLSL::load_flattened_struct(const string &, const SPIRType &)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 
 string CompilerHLSL::to_flattened_struct_member(const string &, const SPIRType &, uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 int CompilerHLSL::get_constant_mapping_to_workgroup_component(const SPIRConstant &) const
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return 0;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 const char *CompilerHLSL::vector_swizzle(int vecsize, int index)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 SmallVector<ConstantID> CompilerHLSL::get_composite_constant_ids(ConstantID)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return SmallVector<ConstantID>();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::set_composite_constant(ConstantID, TypeID,
                                           const SmallVector<ConstantID> &)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 TypeID CompilerHLSL::get_composite_member_type(TypeID, uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return 0;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 string CompilerHLSL::bitcast_glsl(const SPIRType &, uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::fill_composite_constant(SPIRConstant &, TypeID ,
                                            const SmallVector<ConstantID> &)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 uint32_t CompilerHLSL::get_accumulated_member_location(const SPIRVariable &, uint32_t, bool) const
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return 0;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 uint32_t CompilerHLSL::type_to_location_count(const SPIRType &) const
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return 0;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_uninitialized_temporary(uint32_t, uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 string CompilerHLSL::dereference_expression(const SPIRType &, const std::string &)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 std::string CompilerHLSL::flattened_access_chain(uint32_t, const uint32_t *, uint32_t,
@@ -20088,14 +20118,14 @@ std::string CompilerHLSL::flattened_access_chain(uint32_t, const uint32_t *, uin
                                                  uint32_t /* array_stride */, bool)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 std::string CompilerHLSL::flattened_access_chain_struct(uint32_t, const uint32_t *, uint32_t,
                                                         const SPIRType &, uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 std::string CompilerHLSL::flattened_access_chain_matrix(uint32_t, const uint32_t *, uint32_t,
@@ -20103,7 +20133,7 @@ std::string CompilerHLSL::flattened_access_chain_matrix(uint32_t, const uint32_t
                                                         uint32_t, bool)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 std::string CompilerHLSL::flattened_access_chain_vector(uint32_t, const uint32_t *, uint32_t,
@@ -20111,81 +20141,91 @@ std::string CompilerHLSL::flattened_access_chain_vector(uint32_t, const uint32_t
                                                         uint32_t, bool)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::request_subgroup_feature(ShaderSubgroupSupportHelper::Feature)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::rewrite_load_for_wrapped_row_major(std::string &, TypeID, ID)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::request_workaround_wrapper_overload(TypeID)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_binary_func_op_cast(uint32_t, uint32_t, uint32_t, uint32_t,
                                             const char *, SPIRType::BaseType, bool)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_trinary_func_op_cast(uint32_t, uint32_t, uint32_t, uint32_t,
                                              uint32_t, const char *, SPIRType::BaseType)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_nminmax_op(uint32_t, uint32_t, uint32_t, uint32_t, GLSLstd450)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::store_flattened_struct(const string &, uint32_t, const SPIRType &,
                                           const SmallVector<uint32_t> &)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::store_flattened_struct(uint32_t, uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 string CompilerHLSL::to_multi_member_reference(const SPIRType &, const SmallVector<uint32_t> &)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::disallow_forwarding_in_expression_chain(const SPIRExpression &)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 string CompilerHLSL::to_rerolled_array_expression(const SPIRType &,
                                                   const string &, const SPIRType &)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 string CompilerHLSL::to_extract_constant_composite_expression(uint32_t, const SPIRConstant &,
                                                               const uint32_t *, uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_copy_logical_type(uint32_t, uint32_t, uint32_t, uint32_t,
                                           SmallVector<uint32_t>)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 // Used explicitly when we want to read a row-major expression, but without any transpose shenanigans.
@@ -20193,12 +20233,13 @@ void CompilerHLSL::emit_copy_logical_type(uint32_t, uint32_t, uint32_t, uint32_t
 string CompilerHLSL::to_unpacked_row_major_matrix_expression(uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_unary_op_cast(uint32_t, uint32_t, uint32_t, const char *)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_bitfield_insert_op(uint32_t, uint32_t, uint32_t, uint32_t,
@@ -20206,6 +20247,7 @@ void CompilerHLSL::emit_bitfield_insert_op(uint32_t, uint32_t, uint32_t, uint32_
                                            SPIRType::BaseType)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 // Very special case. Handling bitfieldExtract requires us to deal with different bitcasts of different signs
@@ -20217,18 +20259,20 @@ void CompilerHLSL::emit_trinary_func_op_bitextract(uint32_t, uint32_t, uint32_t,
                                                    SPIRType::BaseType)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 bool CompilerHLSL::check_atomic_image(uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return false;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_atomic_func_op(uint32_t, uint32_t, uint32_t, uint32_t,
                                        const char *)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_atomic_func_op(uint32_t, uint32_t,
@@ -20236,54 +20280,60 @@ void CompilerHLSL::emit_atomic_func_op(uint32_t, uint32_t,
                                        const char *)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 std::string CompilerHLSL::convert_separate_image_to_expression(uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 string CompilerHLSL::legacy_tex_op(const std::string &, const SPIRType &, uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return nullptr;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 bool CompilerHLSL::subpass_input_is_framebuffer_fetch(uint32_t) const
 {
 	SPIRV_CROSS_INVALID_CALL();
-	return false;
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_sparse_feedback_temporaries(uint32_t, uint32_t, uint32_t &,
                                                     uint32_t &)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_spv_amd_shader_ballot_op(uint32_t, uint32_t, uint32_t, const uint32_t *,
                                                  uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_spv_amd_shader_explicit_vertex_parameter_op(uint32_t, uint32_t, uint32_t,
                                                                     const uint32_t *, uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_spv_amd_shader_trinary_minmax_op(uint32_t, uint32_t, uint32_t ,
                                                          const uint32_t *, uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 
 void CompilerHLSL::emit_spv_amd_gcn_shader_op(uint32_t, uint32_t, uint32_t, const uint32_t *,
                                               uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
+	SPIRV_CROSS_THROW("Invalid call.");
 }
 #endif
 
