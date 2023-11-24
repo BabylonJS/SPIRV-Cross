@@ -23909,6 +23909,358 @@ bool CompilerMSL::args_will_forward(uint32_t id, const uint32_t *args, uint32_t 
 	return true;
 }
 
+uint32_t CompilerMSL::get_declared_struct_member_alignment_msl(const SPIRType &type, uint32_t index) const
+{
+    return get_declared_type_alignment_msl(get_physical_member_type(type, index),
+                                           member_is_packed_physical_type(type, index),
+                                           has_member_decoration(type.self, index, DecorationRowMajor));
+}
+
+void CompilerMSL::entry_point_args_discrete_descriptors(string &ep_args)
+{
+    // Output resources, sorted by resource index & type
+    // We need to sort to work around a bug on macOS 10.13 with NVidia drivers where switching between shaders
+    // with different order of buffers can result in issues with buffer assignments inside the driver.
+    struct Resource
+    {
+        SPIRVariable *var;
+        SPIRVariable *descriptor_alias;
+        string name;
+        SPIRType::BaseType basetype;
+        uint32_t index;
+        uint32_t plane;
+        uint32_t secondary_index;
+    };
+
+    SmallVector<Resource> resources;
+
+    entry_point_bindings.clear();
+    ir.for_each_typed_id<SPIRVariable>([&](uint32_t var_id, SPIRVariable &var) {
+        if ((var.storage == StorageClassUniform || var.storage == StorageClassUniformConstant ||
+             var.storage == StorageClassPushConstant || var.storage == StorageClassStorageBuffer) &&
+            !is_hidden_variable(var))
+        {
+            auto &type = get_variable_data_type(var);
+
+            if (is_supported_argument_buffer_type(type) && var.storage != StorageClassPushConstant)
+            {
+                uint32_t desc_set = get_decoration(var_id, DecorationDescriptorSet);
+                if (descriptor_set_is_argument_buffer(desc_set))
+                    return;
+            }
+
+            // Handle descriptor aliasing. We can handle aliasing of buffers by casting pointers,
+            // but not for typed resources.
+            SPIRVariable *descriptor_alias = nullptr;
+            if (var.storage == StorageClassUniform || var.storage == StorageClassStorageBuffer)
+            {
+                for (auto &resource : resources)
+                {
+                    if (get_decoration(resource.var->self, DecorationDescriptorSet) ==
+                        get_decoration(var_id, DecorationDescriptorSet) &&
+                        get_decoration(resource.var->self, DecorationBinding) ==
+                        get_decoration(var_id, DecorationBinding) &&
+                        resource.basetype == SPIRType::Struct && type.basetype == SPIRType::Struct &&
+                        (resource.var->storage == StorageClassUniform ||
+                         resource.var->storage == StorageClassStorageBuffer))
+                    {
+                        descriptor_alias = resource.var;
+                        // Self-reference marks that we should declare the resource,
+                        // and it's being used as an alias (so we can emit void* instead).
+                        resource.descriptor_alias = resource.var;
+                        // Need to promote interlocked usage so that the primary declaration is correct.
+                        if (interlocked_resources.count(var_id))
+                            interlocked_resources.insert(resource.var->self);
+                        break;
+                    }
+                }
+            }
+
+            const MSLConstexprSampler *constexpr_sampler = nullptr;
+            if (type.basetype == SPIRType::SampledImage || type.basetype == SPIRType::Sampler)
+            {
+                constexpr_sampler = find_constexpr_sampler(var_id);
+                if (constexpr_sampler)
+                {
+                    // Mark this ID as a constexpr sampler for later in case it came from set/bindings.
+                    constexpr_samplers_by_id[var_id] = *constexpr_sampler;
+                }
+            }
+
+            // Emulate texture2D atomic operations
+            uint32_t secondary_index = 0;
+            if (atomic_image_vars.count(var.self))
+            {
+                secondary_index = get_metal_resource_index(var, SPIRType::AtomicCounter, 0);
+            }
+
+            if (type.basetype == SPIRType::SampledImage)
+            {
+                add_resource_name(var_id);
+
+                uint32_t plane_count = 1;
+                if (constexpr_sampler && constexpr_sampler->ycbcr_conversion_enable)
+                    plane_count = constexpr_sampler->planes;
+
+                entry_point_bindings.push_back(&var);
+                for (uint32_t i = 0; i < plane_count; i++)
+                    resources.push_back({ &var, descriptor_alias, to_name(var_id), SPIRType::Image,
+                                          get_metal_resource_index(var, SPIRType::Image, i), i, secondary_index });
+
+                if (type.image.dim != DimBuffer && !constexpr_sampler)
+                {
+                    resources.push_back({ &var, descriptor_alias, to_sampler_expression(var_id), SPIRType::Sampler,
+                                          get_metal_resource_index(var, SPIRType::Sampler), 0, 0 });
+                }
+            }
+            else if (!constexpr_sampler)
+            {
+                // constexpr samplers are not declared as resources.
+                add_resource_name(var_id);
+
+                // Don't allocate resource indices for aliases.
+                uint32_t resource_index = ~0u;
+                if (!descriptor_alias)
+                    resource_index = get_metal_resource_index(var, type.basetype);
+
+                entry_point_bindings.push_back(&var);
+                resources.push_back({ &var, descriptor_alias, to_name(var_id), type.basetype,
+                                      resource_index, 0, secondary_index });
+            }
+        }
+    });
+
+    stable_sort(resources.begin(), resources.end(),
+                [](const Resource &lhs, const Resource &rhs)
+                { return tie(lhs.basetype, lhs.index) < tie(rhs.basetype, rhs.index); });
+
+    for (auto &r : resources)
+    {
+        auto &var = *r.var;
+        auto &type = get_variable_data_type(var);
+
+        uint32_t var_id = var.self;
+
+        switch (r.basetype)
+        {
+        case SPIRType::Struct:
+        {
+            auto &m = ir.meta[type.self];
+            if (m.members.size() == 0)
+                break;
+
+            if (r.descriptor_alias)
+            {
+                if (r.var == r.descriptor_alias)
+                {
+                    auto primary_name = join("spvBufferAliasSet",
+                                             get_decoration(var_id, DecorationDescriptorSet),
+                                             "Binding",
+                                             get_decoration(var_id, DecorationBinding));
+
+                    // Declare the primary alias as void*
+                    if (!ep_args.empty())
+                        ep_args += ", ";
+                    ep_args += get_argument_address_space(var) + " void* " + primary_name;
+                    ep_args += " [[buffer(" + convert_to_string(r.index) + ")";
+                    if (interlocked_resources.count(var_id))
+                        ep_args += ", raster_order_group(0)";
+                    ep_args += "]]";
+                }
+
+                buffer_aliases_discrete.push_back(r.var->self);
+            }
+            else if (!type.array.empty())
+            {
+                if (type.array.size() > 1)
+                    SPIRV_CROSS_THROW("Arrays of arrays of buffers are not supported.");
+
+                // Metal doesn't directly support this, so we must expand the
+                // array. We'll declare a local array to hold these elements
+                // later.
+                uint32_t array_size = to_array_size_literal(type);
+
+                is_using_builtin_array = true;
+                if (is_runtime_size_array(type))
+                {
+                    add_spv_func_and_recompile(SPVFuncImplVariableDescriptorArray);
+                    if (!ep_args.empty())
+                        ep_args += ", ";
+                    const bool ssbo = has_decoration(type.self, DecorationBufferBlock);
+                    if ((var.storage == spv::StorageClassStorageBuffer || ssbo) &&
+                        msl_options.runtime_array_rich_descriptor)
+                    {
+                        add_spv_func_and_recompile(SPVFuncImplVariableSizedDescriptor);
+                        ep_args += "const device spvBufferDescriptor<" + get_argument_address_space(var) + " " +
+                                   type_to_glsl(type) + "*>* ";
+                    }
+                    else
+                    {
+                        ep_args += "const device spvDescriptor<" + get_argument_address_space(var) + " " +
+                                   type_to_glsl(type) + "*>* ";
+                    }
+                    ep_args += to_restrict(var_id, true) + r.name + "_";
+                    ep_args += " [[buffer(" + convert_to_string(r.index) + ")";
+                    if (interlocked_resources.count(var_id))
+                        ep_args += ", raster_order_group(0)";
+                    ep_args += "]]";
+                }
+                else
+                {
+                    for (uint32_t i = 0; i < array_size; ++i)
+                    {
+                        if (!ep_args.empty())
+                            ep_args += ", ";
+                        ep_args += get_argument_address_space(var) + " " + type_to_glsl(type) + "* " +
+                                   to_restrict(var_id, true) + r.name + "_" + convert_to_string(i);
+                        ep_args += " [[buffer(" + convert_to_string(r.index + i) + ")";
+                        if (interlocked_resources.count(var_id))
+                            ep_args += ", raster_order_group(0)";
+                        ep_args += "]]";
+                    }
+                }
+                is_using_builtin_array = false;
+            }
+            else
+            {
+                if (!ep_args.empty())
+                    ep_args += ", ";
+                ep_args +=
+                    get_argument_address_space(var) + " " + type_to_glsl(type) + "& " + to_restrict(var_id, true) + r.name;
+                ep_args += " [[buffer(" + convert_to_string(r.index) + ")";
+                if (interlocked_resources.count(var_id))
+                    ep_args += ", raster_order_group(0)";
+                ep_args += "]]";
+            }
+            break;
+        }
+        case SPIRType::Sampler:
+            if (!ep_args.empty())
+                ep_args += ", ";
+            ep_args += sampler_type(type, var_id) + " " + r.name;
+            if (is_runtime_size_array(type))
+                ep_args += "_ [[buffer(" + convert_to_string(r.index) + ")]]";
+            else
+                ep_args += " [[sampler(" + convert_to_string(r.index) + ")]]";
+            break;
+        case SPIRType::Image:
+        {
+            if (!ep_args.empty())
+                ep_args += ", ";
+
+            // Use Metal's native frame-buffer fetch API for subpass inputs.
+            const auto &basetype = get<SPIRType>(var.basetype);
+            if (!type_is_msl_framebuffer_fetch(basetype))
+            {
+                ep_args += image_type_glsl(type, var_id) + " " + r.name;
+                if (r.plane > 0)
+                    ep_args += join(plane_name_suffix, r.plane);
+
+                if (is_runtime_size_array(type))
+                    ep_args += "_ [[buffer(" + convert_to_string(r.index) + ")";
+                else
+                    ep_args += " [[texture(" + convert_to_string(r.index) + ")";
+
+                if (interlocked_resources.count(var_id))
+                    ep_args += ", raster_order_group(0)";
+                ep_args += "]]";
+            }
+            else
+            {
+                if (msl_options.is_macos() && !msl_options.supports_msl_version(2, 3))
+                    SPIRV_CROSS_THROW("Framebuffer fetch on Mac is not supported before MSL 2.3.");
+                ep_args += image_type_glsl(type, var_id) + " " + r.name;
+                ep_args += " [[color(" + convert_to_string(r.index) + ")]]";
+            }
+
+            // Emulate texture2D atomic operations
+            if (atomic_image_vars.count(var.self))
+            {
+                ep_args += ", device atomic_" + type_to_glsl(get<SPIRType>(basetype.image.type), 0);
+                ep_args += "* " + r.name + "_atomic";
+                ep_args += " [[buffer(" + convert_to_string(r.secondary_index) + ")";
+                if (interlocked_resources.count(var_id))
+                    ep_args += ", raster_order_group(0)";
+                ep_args += "]]";
+            }
+            break;
+        }
+        case SPIRType::AccelerationStructure:
+        {
+            if (is_runtime_size_array(type))
+            {
+                add_spv_func_and_recompile(SPVFuncImplVariableDescriptor);
+                const auto &parent_type = get<SPIRType>(type.parent_type);
+                ep_args += ", const device spvDescriptor<" + type_to_glsl(parent_type) + ">* " +
+                           to_restrict(var_id, true) + r.name + "_";
+                ep_args += " [[buffer(" + convert_to_string(r.index) + ")]]";
+            }
+            else
+            {
+                ep_args += ", " + type_to_glsl(type, var_id) + " " + r.name;
+                ep_args += " [[buffer(" + convert_to_string(r.index) + ")]]";
+            }
+            break;
+        }
+        default:
+            if (!ep_args.empty())
+                ep_args += ", ";
+            if (!type.pointer)
+                ep_args += get_type_address_space(get<SPIRType>(var.basetype), var_id) + " " +
+                           type_to_glsl(type, var_id) + "& " + r.name;
+            else
+                ep_args += type_to_glsl(type, var_id) + " " + r.name;
+            ep_args += " [[buffer(" + convert_to_string(r.index) + ")";
+            if (interlocked_resources.count(var_id))
+                ep_args += ", raster_order_group(0)";
+            ep_args += "]]";
+            break;
+        }
+    }
+}
+
+bool CompilerMSL::optimize_read_modify_write(const SPIRType &type, const string &lhs, const string &rhs)
+{
+    // Do this with strings because we have a very clear pattern we can check for and it avoids
+    // adding lots of special cases to the code emission.
+    if (rhs.size() < lhs.size() + 3)
+        return false;
+
+    // Do not optimize matrices. They are a bit awkward to reason about in general
+    // (in which order does operation happen?), and it does not work on MSL anyways.
+    if (type.vecsize > 1 && type.columns > 1)
+        return false;
+
+    auto index = rhs.find(lhs);
+    if (index != 0)
+        return false;
+
+    // TODO: Shift operators, but it's not important for now.
+    auto op = rhs.find_first_of("+-/*%|&^", lhs.size() + 1);
+    if (op != lhs.size() + 1)
+        return false;
+
+    // Check that the op is followed by space. This excludes && and ||.
+    if (rhs[op + 1] != ' ')
+        return false;
+
+    char bop = rhs[op];
+    auto expr = rhs.substr(lhs.size() + 3);
+
+    // Avoids false positives where we get a = a * b + c.
+    // Normally, these expressions are always enclosed, but unexpected code paths may end up hitting this.
+    if (needs_enclose_expression(expr))
+        return false;
+
+    // Try to find increments and decrements. Makes it look neater as += 1, -= 1 is fairly rare to see in real code.
+    // Find some common patterns which are equivalent.
+    if ((bop == '+' || bop == '-') && (expr == "1" || expr == "uint(1)" || expr == "1u" || expr == "int(1u)"))
+        statement(lhs, bop, bop, ";");
+    else
+        statement(lhs, " ", bop, "= ", expr, ";");
+    return true;
+}
+
 #ifndef SPIRV_CROSS_TINY
 
 void CompilerMSL::store_flattened_struct(const string &basename, uint32_t rhs_id, const SPIRType &type,
@@ -26419,50 +26771,6 @@ string CompilerMSL::constant_value_macro_name(uint32_t id)
 	return join("SPIRV_CROSS_CONSTANT_ID_", id);
 }
 
-
-bool CompilerMSL::optimize_read_modify_write(const SPIRType &type, const string &lhs, const string &rhs)
-{
-	// Do this with strings because we have a very clear pattern we can check for and it avoids
-	// adding lots of special cases to the code emission.
-	if (rhs.size() < lhs.size() + 3)
-		return false;
-
-	// Do not optimize matrices. They are a bit awkward to reason about in general
-	// (in which order does operation happen?), and it does not work on MSL anyways.
-	if (type.vecsize > 1 && type.columns > 1)
-		return false;
-
-	auto index = rhs.find(lhs);
-	if (index != 0)
-		return false;
-
-	// TODO: Shift operators, but it's not important for now.
-	auto op = rhs.find_first_of("+-/*%|&^", lhs.size() + 1);
-	if (op != lhs.size() + 1)
-		return false;
-
-	// Check that the op is followed by space. This excludes && and ||.
-	if (rhs[op + 1] != ' ')
-		return false;
-
-	char bop = rhs[op];
-	auto expr = rhs.substr(lhs.size() + 3);
-
-	// Avoids false positives where we get a = a * b + c.
-	// Normally, these expressions are always enclosed, but unexpected code paths may end up hitting this.
-	if (needs_enclose_expression(expr))
-		return false;
-
-	// Try to find increments and decrements. Makes it look neater as += 1, -= 1 is fairly rare to see in real code.
-	// Find some common patterns which are equivalent.
-	if ((bop == '+' || bop == '-') && (expr == "1" || expr == "uint(1)" || expr == "1u" || expr == "int(1u)"))
-		statement(lhs, bop, bop, ";");
-	else
-		statement(lhs, " ", bop, "= ", expr, ";");
-	return true;
-}
-
-
 std::string CompilerMSL::convert_double_to_string(const SPIRConstant &c, uint32_t col, uint32_t row)
 {
 	string res;
@@ -27410,14 +27718,6 @@ bool CompilerMSL::SampledImageScanner::handle(spv::Op opcode, const uint32_t *ar
 	return true;
 }
 
-
-uint32_t CompilerMSL::get_declared_struct_member_alignment_msl(const SPIRType &type, uint32_t index) const
-{
-	return get_declared_type_alignment_msl(get_physical_member_type(type, index),
-	                                       member_is_packed_physical_type(type, index),
-	                                       has_member_decoration(type.self, index, DecorationRowMajor));
-}
-
 uint32_t CompilerMSL::get_declared_input_alignment_msl(const SPIRType &type, uint32_t index) const
 {
 	return get_declared_type_alignment_msl(get_presumed_input_type(type, index), false,
@@ -27900,309 +28200,6 @@ const char *CompilerMSL::descriptor_address_space(uint32_t id, StorageClass stor
 	}
 
 	return plain_address_space;
-}
-
-void CompilerMSL::entry_point_args_discrete_descriptors(string &ep_args)
-{
-	// Output resources, sorted by resource index & type
-	// We need to sort to work around a bug on macOS 10.13 with NVidia drivers where switching between shaders
-	// with different order of buffers can result in issues with buffer assignments inside the driver.
-	struct Resource
-	{
-		SPIRVariable *var;
-		SPIRVariable *descriptor_alias;
-		string name;
-		SPIRType::BaseType basetype;
-		uint32_t index;
-		uint32_t plane;
-		uint32_t secondary_index;
-	};
-
-	SmallVector<Resource> resources;
-
-	entry_point_bindings.clear();
-	ir.for_each_typed_id<SPIRVariable>([&](uint32_t var_id, SPIRVariable &var) {
-		if ((var.storage == StorageClassUniform || var.storage == StorageClassUniformConstant ||
-		     var.storage == StorageClassPushConstant || var.storage == StorageClassStorageBuffer) &&
-		    !is_hidden_variable(var))
-		{
-			auto &type = get_variable_data_type(var);
-
-			if (is_supported_argument_buffer_type(type) && var.storage != StorageClassPushConstant)
-			{
-				uint32_t desc_set = get_decoration(var_id, DecorationDescriptorSet);
-				if (descriptor_set_is_argument_buffer(desc_set))
-					return;
-			}
-
-			// Handle descriptor aliasing. We can handle aliasing of buffers by casting pointers,
-			// but not for typed resources.
-			SPIRVariable *descriptor_alias = nullptr;
-			if (var.storage == StorageClassUniform || var.storage == StorageClassStorageBuffer)
-			{
-				for (auto &resource : resources)
-				{
-					if (get_decoration(resource.var->self, DecorationDescriptorSet) ==
-					    get_decoration(var_id, DecorationDescriptorSet) &&
-					    get_decoration(resource.var->self, DecorationBinding) ==
-					    get_decoration(var_id, DecorationBinding) &&
-					    resource.basetype == SPIRType::Struct && type.basetype == SPIRType::Struct &&
-					    (resource.var->storage == StorageClassUniform ||
-					     resource.var->storage == StorageClassStorageBuffer))
-					{
-						descriptor_alias = resource.var;
-						// Self-reference marks that we should declare the resource,
-						// and it's being used as an alias (so we can emit void* instead).
-						resource.descriptor_alias = resource.var;
-						// Need to promote interlocked usage so that the primary declaration is correct.
-						if (interlocked_resources.count(var_id))
-							interlocked_resources.insert(resource.var->self);
-						break;
-					}
-				}
-			}
-
-			const MSLConstexprSampler *constexpr_sampler = nullptr;
-			if (type.basetype == SPIRType::SampledImage || type.basetype == SPIRType::Sampler)
-			{
-				constexpr_sampler = find_constexpr_sampler(var_id);
-				if (constexpr_sampler)
-				{
-					// Mark this ID as a constexpr sampler for later in case it came from set/bindings.
-					constexpr_samplers_by_id[var_id] = *constexpr_sampler;
-				}
-			}
-
-			// Emulate texture2D atomic operations
-			uint32_t secondary_index = 0;
-			if (atomic_image_vars.count(var.self))
-			{
-				secondary_index = get_metal_resource_index(var, SPIRType::AtomicCounter, 0);
-			}
-
-			if (type.basetype == SPIRType::SampledImage)
-			{
-				add_resource_name(var_id);
-
-				uint32_t plane_count = 1;
-				if (constexpr_sampler && constexpr_sampler->ycbcr_conversion_enable)
-					plane_count = constexpr_sampler->planes;
-
-				entry_point_bindings.push_back(&var);
-				for (uint32_t i = 0; i < plane_count; i++)
-					resources.push_back({ &var, descriptor_alias, to_name(var_id), SPIRType::Image,
-					                      get_metal_resource_index(var, SPIRType::Image, i), i, secondary_index });
-
-				if (type.image.dim != DimBuffer && !constexpr_sampler)
-				{
-					resources.push_back({ &var, descriptor_alias, to_sampler_expression(var_id), SPIRType::Sampler,
-					                      get_metal_resource_index(var, SPIRType::Sampler), 0, 0 });
-				}
-			}
-			else if (!constexpr_sampler)
-			{
-				// constexpr samplers are not declared as resources.
-				add_resource_name(var_id);
-
-				// Don't allocate resource indices for aliases.
-				uint32_t resource_index = ~0u;
-				if (!descriptor_alias)
-					resource_index = get_metal_resource_index(var, type.basetype);
-
-				entry_point_bindings.push_back(&var);
-				resources.push_back({ &var, descriptor_alias, to_name(var_id), type.basetype,
-				                      resource_index, 0, secondary_index });
-			}
-		}
-	});
-
-	stable_sort(resources.begin(), resources.end(),
-	            [](const Resource &lhs, const Resource &rhs)
-	            { return tie(lhs.basetype, lhs.index) < tie(rhs.basetype, rhs.index); });
-
-	for (auto &r : resources)
-	{
-		auto &var = *r.var;
-		auto &type = get_variable_data_type(var);
-
-		uint32_t var_id = var.self;
-
-		switch (r.basetype)
-		{
-		case SPIRType::Struct:
-		{
-			auto &m = ir.meta[type.self];
-			if (m.members.size() == 0)
-				break;
-
-			if (r.descriptor_alias)
-			{
-				if (r.var == r.descriptor_alias)
-				{
-					auto primary_name = join("spvBufferAliasSet",
-					                         get_decoration(var_id, DecorationDescriptorSet),
-					                         "Binding",
-					                         get_decoration(var_id, DecorationBinding));
-
-					// Declare the primary alias as void*
-					if (!ep_args.empty())
-						ep_args += ", ";
-					ep_args += get_argument_address_space(var) + " void* " + primary_name;
-					ep_args += " [[buffer(" + convert_to_string(r.index) + ")";
-					if (interlocked_resources.count(var_id))
-						ep_args += ", raster_order_group(0)";
-					ep_args += "]]";
-				}
-
-				buffer_aliases_discrete.push_back(r.var->self);
-			}
-			else if (!type.array.empty())
-			{
-				if (type.array.size() > 1)
-					SPIRV_CROSS_THROW("Arrays of arrays of buffers are not supported.");
-
-				// Metal doesn't directly support this, so we must expand the
-				// array. We'll declare a local array to hold these elements
-				// later.
-				uint32_t array_size = to_array_size_literal(type);
-
-				is_using_builtin_array = true;
-				if (is_runtime_size_array(type))
-				{
-					add_spv_func_and_recompile(SPVFuncImplVariableDescriptorArray);
-					if (!ep_args.empty())
-						ep_args += ", ";
-					const bool ssbo = has_decoration(type.self, DecorationBufferBlock);
-					if ((var.storage == spv::StorageClassStorageBuffer || ssbo) &&
-					    msl_options.runtime_array_rich_descriptor)
-					{
-						add_spv_func_and_recompile(SPVFuncImplVariableSizedDescriptor);
-						ep_args += "const device spvBufferDescriptor<" + get_argument_address_space(var) + " " +
-						           type_to_glsl(type) + "*>* ";
-					}
-					else
-					{
-						ep_args += "const device spvDescriptor<" + get_argument_address_space(var) + " " +
-						           type_to_glsl(type) + "*>* ";
-					}
-					ep_args += to_restrict(var_id, true) + r.name + "_";
-					ep_args += " [[buffer(" + convert_to_string(r.index) + ")";
-					if (interlocked_resources.count(var_id))
-						ep_args += ", raster_order_group(0)";
-					ep_args += "]]";
-				}
-				else
-				{
-					for (uint32_t i = 0; i < array_size; ++i)
-					{
-						if (!ep_args.empty())
-							ep_args += ", ";
-						ep_args += get_argument_address_space(var) + " " + type_to_glsl(type) + "* " +
-						           to_restrict(var_id, true) + r.name + "_" + convert_to_string(i);
-						ep_args += " [[buffer(" + convert_to_string(r.index + i) + ")";
-						if (interlocked_resources.count(var_id))
-							ep_args += ", raster_order_group(0)";
-						ep_args += "]]";
-					}
-				}
-				is_using_builtin_array = false;
-			}
-			else
-			{
-				if (!ep_args.empty())
-					ep_args += ", ";
-				ep_args +=
-				    get_argument_address_space(var) + " " + type_to_glsl(type) + "& " + to_restrict(var_id, true) + r.name;
-				ep_args += " [[buffer(" + convert_to_string(r.index) + ")";
-				if (interlocked_resources.count(var_id))
-					ep_args += ", raster_order_group(0)";
-				ep_args += "]]";
-			}
-			break;
-		}
-		case SPIRType::Sampler:
-			if (!ep_args.empty())
-				ep_args += ", ";
-			ep_args += sampler_type(type, var_id) + " " + r.name;
-			if (is_runtime_size_array(type))
-				ep_args += "_ [[buffer(" + convert_to_string(r.index) + ")]]";
-			else
-				ep_args += " [[sampler(" + convert_to_string(r.index) + ")]]";
-			break;
-		case SPIRType::Image:
-		{
-			if (!ep_args.empty())
-				ep_args += ", ";
-
-			// Use Metal's native frame-buffer fetch API for subpass inputs.
-			const auto &basetype = get<SPIRType>(var.basetype);
-			if (!type_is_msl_framebuffer_fetch(basetype))
-			{
-				ep_args += image_type_glsl(type, var_id) + " " + r.name;
-				if (r.plane > 0)
-					ep_args += join(plane_name_suffix, r.plane);
-
-				if (is_runtime_size_array(type))
-					ep_args += "_ [[buffer(" + convert_to_string(r.index) + ")";
-				else
-					ep_args += " [[texture(" + convert_to_string(r.index) + ")";
-
-				if (interlocked_resources.count(var_id))
-					ep_args += ", raster_order_group(0)";
-				ep_args += "]]";
-			}
-			else
-			{
-				if (msl_options.is_macos() && !msl_options.supports_msl_version(2, 3))
-					SPIRV_CROSS_THROW("Framebuffer fetch on Mac is not supported before MSL 2.3.");
-				ep_args += image_type_glsl(type, var_id) + " " + r.name;
-				ep_args += " [[color(" + convert_to_string(r.index) + ")]]";
-			}
-
-			// Emulate texture2D atomic operations
-			if (atomic_image_vars.count(var.self))
-			{
-				ep_args += ", device atomic_" + type_to_glsl(get<SPIRType>(basetype.image.type), 0);
-				ep_args += "* " + r.name + "_atomic";
-				ep_args += " [[buffer(" + convert_to_string(r.secondary_index) + ")";
-				if (interlocked_resources.count(var_id))
-					ep_args += ", raster_order_group(0)";
-				ep_args += "]]";
-			}
-			break;
-		}
-		case SPIRType::AccelerationStructure:
-		{
-			if (is_runtime_size_array(type))
-			{
-				add_spv_func_and_recompile(SPVFuncImplVariableDescriptor);
-				const auto &parent_type = get<SPIRType>(type.parent_type);
-				ep_args += ", const device spvDescriptor<" + type_to_glsl(parent_type) + ">* " +
-				           to_restrict(var_id, true) + r.name + "_";
-				ep_args += " [[buffer(" + convert_to_string(r.index) + ")]]";
-			}
-			else
-			{
-				ep_args += ", " + type_to_glsl(type, var_id) + " " + r.name;
-				ep_args += " [[buffer(" + convert_to_string(r.index) + ")]]";
-			}
-			break;
-		}
-		default:
-			if (!ep_args.empty())
-				ep_args += ", ";
-			if (!type.pointer)
-				ep_args += get_type_address_space(get<SPIRType>(var.basetype), var_id) + " " +
-				           type_to_glsl(type, var_id) + "& " + r.name;
-			else
-				ep_args += type_to_glsl(type, var_id) + " " + r.name;
-			ep_args += " [[buffer(" + convert_to_string(r.index) + ")";
-			if (interlocked_resources.count(var_id))
-				ep_args += ", raster_order_group(0)";
-			ep_args += "]]";
-			break;
-		}
-	}
 }
 
 string CompilerMSL::entry_point_args_argument_buffer(bool append_comma)
@@ -30964,13 +30961,6 @@ string CompilerMSL::constant_value_macro_name(uint32_t)
 }
 
 
-bool CompilerMSL::optimize_read_modify_write(const SPIRType &, const string &, const string &)
-{
-	SPIRV_CROSS_INVALID_CALL();
-	SPIRV_CROSS_THROW("Invalid call.");
-}
-
-
 std::string CompilerMSL::convert_double_to_string(const SPIRConstant &, uint32_t, uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
@@ -31186,13 +31176,6 @@ bool CompilerMSL::SampledImageScanner::handle(spv::Op, const uint32_t *, uint32_
 	SPIRV_CROSS_THROW("Invalid call.");
 }
 
-
-uint32_t CompilerMSL::get_declared_struct_member_alignment_msl(const SPIRType &, uint32_t) const
-{
-	SPIRV_CROSS_INVALID_CALL();
-	SPIRV_CROSS_THROW("Invalid call.");
-}
-
 uint32_t CompilerMSL::get_declared_input_alignment_msl(const SPIRType &, uint32_t) const
 {
 	SPIRV_CROSS_INVALID_CALL();
@@ -31269,12 +31252,6 @@ bool CompilerMSL::type_is_pointer_to_pointer(const SPIRType &) const
 }
 
 const char *CompilerMSL::descriptor_address_space(uint32_t, StorageClass, const char *) const
-{
-	SPIRV_CROSS_INVALID_CALL();
-	SPIRV_CROSS_THROW("Invalid call.");
-}
-
-void CompilerMSL::entry_point_args_discrete_descriptors(string &)
 {
 	SPIRV_CROSS_INVALID_CALL();
 	SPIRV_CROSS_THROW("Invalid call.");
