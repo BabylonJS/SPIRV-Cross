@@ -2199,7 +2199,7 @@ void CompilerHLSL::emit_resources()
 		}
 	}
 
-	#ifndef SPIRV_CROSS_TINY
+#ifndef SPIRV_CROSS_WEBMIN
 	if (requires_fp16_packing)
 	{
 		// HLSL does not pack into a single word sadly :(
@@ -2581,7 +2581,7 @@ void CompilerHLSL::emit_resources()
 		statement("");
 	}
 
-	#ifndef SPIRV_CROSS_TINY
+#ifndef SPIRV_CROSS_WEBMIN
 	if (is_mesh_shader && options.vertex.flip_vert_y)
 	{
 		statement("float4 spvFlipVertY(float4 v)");
@@ -2595,7 +2595,7 @@ void CompilerHLSL::emit_resources()
 		end_scope();
 		statement("");
 	}
-	#endif
+#endif
 }
 
 void CompilerHLSL::emit_texture_size_variants(uint64_t variant_mask, const char *vecsize_qualifier, bool uav,
@@ -3183,7 +3183,7 @@ void CompilerHLSL::emit_hlsl_entry_point()
 			break;
 
 		case BuiltInSubgroupEqMask:
-#ifndef SPIRV_CROSS_TINY
+#ifndef SPIRV_CROSS_WEBMIN
 			// Emulate these ...
 			// No 64-bit in HLSL, so have to do it in 32-bit and unroll.
 			statement("gl_SubgroupEqMask = 1u << (WaveGetLaneIndex() - uint4(0, 32, 64, 96));");
@@ -3195,7 +3195,7 @@ void CompilerHLSL::emit_hlsl_entry_point()
 			break;
 
 		case BuiltInSubgroupGeMask:
-#ifndef SPIRV_CROSS_TINY
+#ifndef SPIRV_CROSS_WEBMIN
 			// Emulate these ...
 			// No 64-bit in HLSL, so have to do it in 32-bit and unroll.
 			statement("gl_SubgroupGeMask = ~((1u << (WaveGetLaneIndex() - uint4(0, 32, 64, 96))) - 1u);");
@@ -3209,7 +3209,7 @@ void CompilerHLSL::emit_hlsl_entry_point()
 			break;
 
 		case BuiltInSubgroupGtMask:
-#ifndef SPIRV_CROSS_TINY
+#ifndef SPIRV_CROSS_WEBMIN
 			// Emulate these ...
 			// No 64-bit in HLSL, so have to do it in 32-bit and unroll.
 			statement("uint gt_lane_index = WaveGetLaneIndex() + 1;");
@@ -3225,7 +3225,7 @@ void CompilerHLSL::emit_hlsl_entry_point()
 			break;
 
 		case BuiltInSubgroupLeMask:
-#ifndef SPIRV_CROSS_TINY
+#ifndef SPIRV_CROSS_WEBMIN
 			// Emulate these ...
 			// No 64-bit in HLSL, so have to do it in 32-bit and unroll.
 			statement("uint le_lane_index = WaveGetLaneIndex() + 1;");
@@ -3241,7 +3241,7 @@ void CompilerHLSL::emit_hlsl_entry_point()
 			break;
 
 		case BuiltInSubgroupLtMask:
-#ifndef SPIRV_CROSS_TINY
+#ifndef SPIRV_CROSS_WEBMIN
 			// Emulate these ...
 			// No 64-bit in HLSL, so have to do it in 32-bit and unroll.
 			statement("gl_SubgroupLtMask = (1u << (WaveGetLaneIndex() - uint4(0, 32, 64, 96))) - 1u;");
@@ -3255,7 +3255,7 @@ void CompilerHLSL::emit_hlsl_entry_point()
 			break;
 
 		case BuiltInClipDistance:
-#ifndef SPIRV_CROSS_TINY
+#ifndef SPIRV_CROSS_WEBMIN
 			for (uint32_t clip = 0; clip < clip_distance_count; clip++)
 				statement("gl_ClipDistance[", clip, "] = stage_input.gl_ClipDistance", clip / 4, ".", "xyzw"[clip & 3],
 				          ";");
@@ -3263,7 +3263,7 @@ void CompilerHLSL::emit_hlsl_entry_point()
 			break;
 
 		case BuiltInCullDistance:
-#ifndef SPIRV_CROSS_TINY
+#ifndef SPIRV_CROSS_WEBMIN
 			for (uint32_t cull = 0; cull < cull_distance_count; cull++)
 				statement("gl_CullDistance[", cull, "] = stage_input.gl_CullDistance", cull / 4, ".", "xyzw"[cull & 3],
 				          ";");
@@ -15486,7 +15486,7 @@ bool CompilerHLSL::should_suppress_usage_tracking(uint32_t id) const
 	return !expression_is_forwarded(id) || expression_suppresses_usage_tracking(id);
 }
 
-#ifndef SPIRV_CROSS_TINY
+#ifndef SPIRV_CROSS_WEBMIN
 CompilerHLSL::ShaderSubgroupSupportHelper::Result::Result()
 {
 	for (auto &weight : weights)

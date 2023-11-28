@@ -24261,7 +24261,7 @@ bool CompilerMSL::optimize_read_modify_write(const SPIRType &type, const string 
     return true;
 }
 
-#ifndef SPIRV_CROSS_TINY
+#ifndef SPIRV_CROSS_WEBMIN
 
 void CompilerMSL::store_flattened_struct(const string &basename, uint32_t rhs_id, const SPIRType &type,
                                           const SmallVector<uint32_t> &indices)

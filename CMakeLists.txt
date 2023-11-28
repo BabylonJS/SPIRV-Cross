@@ -61,6 +61,12 @@ option(SPIRV_CROSS_WERROR "Fail build on warnings." OFF)
 option(SPIRV_CROSS_MISC_WARNINGS "Misc warnings useful for Travis runs." OFF)
 
 option(SPIRV_CROSS_FORCE_PIC "Force position-independent code for all targets." OFF)
+option(SPIRV_CROSS_ENABLE_WEBMIN "Reduces SPIRV-Cross to minimum needed for web use" OFF)
+
+CMAKE_DEPENDENT_OPTION(SPIRV_CROSS_ENABLE_WEBMIN_DEVEL
+    "For SPIRV_CROSS_ENABLE_WEBMIN builds, enables compilation error messages"
+    OFF "SPIRV_CROSS_ENABLE_WEBMIN"
+    OFF)
 
 if(${CMAKE_GENERATOR} MATCHES "Makefile")
 	if(${CMAKE_CURRENT_SOURCE_DIR} STREQUAL ${CMAKE_CURRENT_BINARY_DIR})
@@ -71,6 +77,13 @@ endif()
 set(spirv-compiler-options "")
 set(spirv-compiler-defines "")
 set(spirv-cross-link-flags "")
+
+if(SPIRV_CROSS_ENABLE_WEBMIN)
+    add_definitions(-DSPIRV_CROSS_WEBMIN)
+	if(SPIRV_CROSS_ENABLE_WEBMIN_DEVEL)
+        add_definitions(-DSPIRV_CROSS_WEBMIN_DEVEL)
+    endif()
+endif()
 
 message(STATUS "SPIRV-Cross: Finding Git version for SPIRV-Cross.")
 set(spirv-cross-build-version "unknown")

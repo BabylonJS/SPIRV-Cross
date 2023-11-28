@@ -37,8 +37,6 @@
 #define SPIRV_CROSS_NAMESPACE spirv_cross
 #endif
 
-#define SPIRV_CROSS_TINY
-
 namespace SPIRV_CROSS_NAMESPACE
 {
 #ifdef SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS
@@ -70,7 +68,7 @@ public:
 	}
 };
 
-#ifdef SPIRV_CROSS_TINY
+#ifdef SPIRV_CROSS_WEBMIN_DEVEL
 #define SPIRV_CROSS_THROW(x) throw CompilerError("")
 #else
 #define SPIRV_CROSS_THROW(x) throw CompilerError(x)
