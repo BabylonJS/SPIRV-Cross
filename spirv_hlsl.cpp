@@ -31,6 +31,8 @@ using namespace spv;
 using namespace SPIRV_CROSS_NAMESPACE;
 using namespace std;
 
+#define SPIRV_CROSS_INVALID_CALL() assert(false);
+
 enum ExtraSubExpressionType
 {
 	// Create masks above any legal ID range to allow multiple address spaces into the extra_sub_expressions map.
@@ -12123,6 +12125,7 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 
 	case OpArrayLength:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
 		auto e = access_chain_internal(ops[2], &ops[3], length - 3, ACCESS_CHAIN_INDEX_IS_LITERAL_BIT, nullptr);
@@ -12130,6 +12133,9 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 			convert_non_uniform_expression(e, ops[2]);
 		set<SPIRExpression>(id, join(type_to_glsl(get<SPIRType>(result_type)), "(", e, ".length())"), result_type,
 		                    true);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
@@ -12348,6 +12354,7 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 
 	case OpVectorInsertDynamic:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
 		uint32_t vec = ops[2];
@@ -12361,11 +12368,15 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		set<SPIRExpression>(id, to_name(id), result_type, true);
 		auto chain = access_chain_internal(id, &index, 1, 0, nullptr);
 		statement(chain, " = ", to_unpacked_expression(comp), ";");
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpVectorExtractDynamic:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
 
@@ -12373,6 +12384,9 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		emit_op(result_type, id, expr, should_forward(ops[2]));
 		inherit_expression_dependencies(id, ops[2]);
 		inherit_expression_dependencies(id, ops[3]);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
@@ -12462,6 +12476,7 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 
 	case OpCompositeInsert:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
 		uint32_t obj = ops[2];
@@ -12531,7 +12546,9 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 			auto chain = access_chain_internal(id, elems, length, ACCESS_CHAIN_INDEX_IS_LITERAL_BIT, nullptr);
 			statement(chain, " = ", to_unpacked_expression(obj), ";");
 		}
-
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
@@ -12568,6 +12585,7 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 
 	case OpCopyLogical:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		// This is used for copying object of different types, arrays and structs.
 		// We need to unroll the copy, element-by-element.
 		uint32_t result_type = ops[0];
@@ -12576,11 +12594,15 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 
 		emit_uninitialized_temporary_expression(result_type, id);
 		emit_copy_logical_type(id, result_type, rhs, expression_type_id(rhs), {});
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpCopyObject:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
 		uint32_t rhs = ops[2];
@@ -12629,6 +12651,9 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 				e.expression_dependencies = rhs_expr->expression_dependencies;
 			}
 		}
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
@@ -12715,6 +12740,7 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 
 	// ALU
 	case OpIsNan:
+#ifndef SPIRV_CROSS_WEBMIN
 		if (!is_legacy())
 			GLSL_UFOP(isnan);
 		else
@@ -12726,9 +12752,13 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 			else
 				emit_binary_op(ops[0], ops[1], ops[2], ops[2], "!=");
 		}
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 
 	case OpIsInf:
+#ifndef SPIRV_CROSS_WEBMIN
 		if (!is_legacy())
 			GLSL_UFOP(isinf);
 		else
@@ -12766,13 +12796,20 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 
 			inherit_expression_dependencies(result_id, operand);
 		}
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 
 	case OpSNegate:
+#ifndef SPIRV_CROSS_WEBMIN
 		if (implicit_integer_promotion || expression_type_id(ops[2]) != ops[0])
 			GLSL_UOP_CAST(-);
 		else
 			GLSL_UOP(-);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 
 	case OpFNegate:
@@ -12793,8 +12830,12 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 
 	case OpISub:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		auto type = get<SPIRType>(ops[0]).basetype;
 		GLSL_BOP_CAST(-, type);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
@@ -12804,14 +12845,19 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 
 	case OpIMul:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		auto type = get<SPIRType>(ops[0]).basetype;
 		GLSL_BOP_CAST(*, type);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpVectorTimesMatrix:
 	case OpMatrixTimesVector:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		// If the matrix needs transpose, just flip the multiply order.
 		auto *e = maybe_get<SPIRExpression>(ops[opcode == OpMatrixTimesVector ? 2 : 3]);
 		if (e && e->need_transpose)
@@ -12834,11 +12880,15 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		}
 		else
 			GLSL_BOP(*);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpMatrixTimesMatrix:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		auto *a = maybe_get<SPIRExpression>(ops[2]);
 		auto *b = maybe_get<SPIRExpression>(ops[3]);
 
@@ -12860,7 +12910,9 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		}
 		else
 			GLSL_BOP(*);
-
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
@@ -12892,6 +12944,7 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		break;
 
 	case OpOuterProduct:
+#ifndef SPIRV_CROSS_WEBMIN
 		if (options.version < 120) // Matches GLSL 1.10 / ESSL 1.00
 		{
 			uint32_t result_type = ops[0];
@@ -12917,6 +12970,9 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		}
 		else
 			GLSL_BFOP(outerProduct);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 
 	case OpDot:
@@ -12924,6 +12980,7 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		break;
 
 	case OpTranspose:
+#ifndef SPIRV_CROSS_WEBMIN
 		if (options.version < 120) // Matches GLSL 1.10 / ESSL 1.00
 		{
 			// transpose() is not available, so instead, flip need_transpose,
@@ -12950,10 +13007,14 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		}
 		else
 			GLSL_UFOP(transpose);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 
 	case OpSRem:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t result_id = ops[1];
 		uint32_t op0 = ops[2];
@@ -12970,6 +13031,9 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		emit_op(result_type, result_id, expr, forward);
 		inherit_expression_dependencies(result_id, op0);
 		inherit_expression_dependencies(result_id, op1);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
@@ -12984,6 +13048,7 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 	case OpIAddCarry:
 	case OpISubBorrow:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		if (options.es && options.version < 310)
 			SPIRV_CROSS_THROW("Extended arithmetic is only available from ESSL 310.");
 		else if (!options.es && options.version < 400)
@@ -12999,12 +13064,16 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 
 		statement(to_expression(result_id), ".", to_member_name(type, 0), " = ", op, "(", to_expression(op0), ", ",
 		          to_expression(op1), ", ", to_expression(result_id), ".", to_member_name(type, 1), ");");
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpUMulExtended:
 	case OpSMulExtended:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		if (options.es && options.version < 310)
 			SPIRV_CROSS_THROW("Extended arithmetic is only available from ESSL 310.");
 		else if (!options.es && options.version < 400)
@@ -13020,6 +13089,9 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 
 		statement(op, "(", to_expression(op0), ", ", to_expression(op1), ", ", to_expression(result_id), ".",
 		          to_member_name(type, 1), ", ", to_expression(result_id), ".", to_member_name(type, 0), ");");
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
@@ -13084,6 +13156,7 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 
 	case OpFRem:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t result_id = ops[1];
 		uint32_t op0 = ops[2];
@@ -13111,6 +13184,9 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		emit_op(result_type, result_id, expr, forward);
 		inherit_expression_dependencies(result_id, op0);
 		inherit_expression_dependencies(result_id, op1);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
@@ -13129,6 +13205,7 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 
 	case OpLogicalOr:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		// No vector variant in GLSL for logical OR.
 		auto result_type = ops[0];
 		auto id = ops[1];
@@ -13138,11 +13215,15 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 			emit_unrolled_binary_op(result_type, id, ops[2], ops[3], "||", false, SPIRType::Unknown);
 		else
 			GLSL_BOP(||);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpLogicalAnd:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		// No vector variant in GLSL for logical AND.
 		auto result_type = ops[0];
 		auto id = ops[1];
@@ -13152,44 +13233,63 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 			emit_unrolled_binary_op(result_type, id, ops[2], ops[3], "&&", false, SPIRType::Unknown);
 		else
 			GLSL_BOP(&&);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpLogicalNot:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		auto &type = get<SPIRType>(ops[0]);
 		if (type.vecsize > 1)
 			GLSL_UFOP(not );
 		else
 			GLSL_UOP(!);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpIEqual:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		if (expression_type(ops[2]).vecsize > 1)
 			GLSL_BFOP_CAST(equal, int_type);
 		else
 			GLSL_BOP_CAST(==, int_type);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpLogicalEqual:
 	case OpFOrdEqual:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		if (expression_type(ops[2]).vecsize > 1)
 			GLSL_BFOP(equal);
 		else
 			GLSL_BOP(==);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpINotEqual:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		if (expression_type(ops[2]).vecsize > 1)
 			GLSL_BFOP_CAST(notEqual, int_type);
 		else
 			GLSL_BOP_CAST(!=, int_type);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
@@ -13197,6 +13297,7 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 	case OpFOrdNotEqual:
 	case OpFUnordNotEqual:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		// GLSL is fuzzy on what to do with ordered vs unordered not equal.
 		// glslang started emitting UnorderedNotEqual some time ago to harmonize with IEEE,
 		// but this means we have no easy way of implementing ordered not equal.
@@ -13204,86 +13305,121 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 			GLSL_BFOP(notEqual);
 		else
 			GLSL_BOP(!=);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpUGreaterThan:
 	case OpSGreaterThan:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		auto type = opcode == OpUGreaterThan ? uint_type : int_type;
 		if (expression_type(ops[2]).vecsize > 1)
 			GLSL_BFOP_CAST(greaterThan, type);
 		else
 			GLSL_BOP_CAST(>, type);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpFOrdGreaterThan:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		if (expression_type(ops[2]).vecsize > 1)
 			GLSL_BFOP(greaterThan);
 		else
 			GLSL_BOP(>);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpUGreaterThanEqual:
 	case OpSGreaterThanEqual:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		auto type = opcode == OpUGreaterThanEqual ? uint_type : int_type;
 		if (expression_type(ops[2]).vecsize > 1)
 			GLSL_BFOP_CAST(greaterThanEqual, type);
 		else
 			GLSL_BOP_CAST(>=, type);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpFOrdGreaterThanEqual:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		if (expression_type(ops[2]).vecsize > 1)
 			GLSL_BFOP(greaterThanEqual);
 		else
 			GLSL_BOP(>=);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpULessThan:
 	case OpSLessThan:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		auto type = opcode == OpULessThan ? uint_type : int_type;
 		if (expression_type(ops[2]).vecsize > 1)
 			GLSL_BFOP_CAST(lessThan, type);
 		else
 			GLSL_BOP_CAST(<, type);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpFOrdLessThan:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		if (expression_type(ops[2]).vecsize > 1)
 			GLSL_BFOP(lessThan);
 		else
 			GLSL_BOP(<);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpULessThanEqual:
 	case OpSLessThanEqual:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		auto type = opcode == OpULessThanEqual ? uint_type : int_type;
 		if (expression_type(ops[2]).vecsize > 1)
 			GLSL_BFOP_CAST(lessThanEqual, type);
 		else
 			GLSL_BOP_CAST(<=, type);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpFOrdLessThanEqual:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		if (expression_type(ops[2]).vecsize > 1)
 			GLSL_BFOP(lessThanEqual);
 		else
 			GLSL_BOP(<=);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
@@ -13311,6 +13447,7 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 	case OpConvertFToU:
 	case OpConvertFToS:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		// Cast to expected arithmetic type, then potentially bitcast away to desired signedness.
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
@@ -13322,21 +13459,29 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 
 		auto func = type_to_glsl_constructor(expected_type);
 		emit_unary_func_op_cast(result_type, id, ops[2], func.c_str(), float_type.basetype, expected_type.basetype);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpFConvert:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
 
 		auto func = type_to_glsl_constructor(get<SPIRType>(result_type));
 		emit_unary_func_op(result_type, id, ops[2], func.c_str());
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpBitcast:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
 		uint32_t arg = ops[2];
@@ -13346,11 +13491,15 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 			auto op = bitcast_glsl_op(get<SPIRType>(result_type), expression_type(arg));
 			emit_unary_func_op(result_type, id, arg, op.c_str());
 		}
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpQuantizeToF16:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
 		uint32_t arg = ops[2];
@@ -13386,25 +13535,37 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 
 		emit_op(result_type, id, op, should_forward(arg));
 		inherit_expression_dependencies(id, arg);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	// Derivatives
 	case OpDPdx:
+#ifndef SPIRV_CROSS_WEBMIN
 		GLSL_UFOP(dFdx);
 		if (is_legacy_es())
 			require_extension_internal("GL_OES_standard_derivatives");
 		register_control_dependent_expression(ops[1]);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 
 	case OpDPdy:
+#ifndef SPIRV_CROSS_WEBMIN
 		GLSL_UFOP(dFdy);
 		if (is_legacy_es())
 			require_extension_internal("GL_OES_standard_derivatives");
 		register_control_dependent_expression(ops[1]);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 
 	case OpDPdxFine:
+#ifndef SPIRV_CROSS_WEBMIN
 		GLSL_UFOP(dFdxFine);
 		if (options.es)
 		{
@@ -13413,9 +13574,13 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		if (options.version < 450)
 			require_extension_internal("GL_ARB_derivative_control");
 		register_control_dependent_expression(ops[1]);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 
 	case OpDPdyFine:
+#ifndef SPIRV_CROSS_WEBMIN
 		GLSL_UFOP(dFdyFine);
 		if (options.es)
 		{
@@ -13424,9 +13589,13 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		if (options.version < 450)
 			require_extension_internal("GL_ARB_derivative_control");
 		register_control_dependent_expression(ops[1]);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 
 	case OpDPdxCoarse:
+#ifndef SPIRV_CROSS_WEBMIN
 		if (options.es)
 		{
 			SPIRV_CROSS_THROW("GL_ARB_derivative_control is unavailable in OpenGL ES.");
@@ -13435,9 +13604,13 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		if (options.version < 450)
 			require_extension_internal("GL_ARB_derivative_control");
 		register_control_dependent_expression(ops[1]);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 
 	case OpDPdyCoarse:
+#ifndef SPIRV_CROSS_WEBMIN
 		GLSL_UFOP(dFdyCoarse);
 		if (options.es)
 		{
@@ -13446,16 +13619,24 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		if (options.version < 450)
 			require_extension_internal("GL_ARB_derivative_control");
 		register_control_dependent_expression(ops[1]);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 
 	case OpFwidth:
+#ifndef SPIRV_CROSS_WEBMIN
 		GLSL_UFOP(fwidth);
 		if (is_legacy_es())
 			require_extension_internal("GL_OES_standard_derivatives");
 		register_control_dependent_expression(ops[1]);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 
 	case OpFwidthCoarse:
+#ifndef SPIRV_CROSS_WEBMIN
 		GLSL_UFOP(fwidthCoarse);
 		if (options.es)
 		{
@@ -13464,9 +13645,13 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		if (options.version < 450)
 			require_extension_internal("GL_ARB_derivative_control");
 		register_control_dependent_expression(ops[1]);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 
 	case OpFwidthFine:
+#ifndef SPIRV_CROSS_WEBMIN
 		GLSL_UFOP(fwidthFine);
 		if (options.es)
 		{
@@ -13475,44 +13660,68 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		if (options.version < 450)
 			require_extension_internal("GL_ARB_derivative_control");
 		register_control_dependent_expression(ops[1]);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 
 	// Bitfield
 	case OpBitFieldInsert:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		emit_bitfield_insert_op(ops[0], ops[1], ops[2], ops[3], ops[4], ops[5], "bitfieldInsert", SPIRType::Int);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpBitFieldSExtract:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		emit_trinary_func_op_bitextract(ops[0], ops[1], ops[2], ops[3], ops[4], "bitfieldExtract", int_type, int_type,
 		                                SPIRType::Int, SPIRType::Int);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpBitFieldUExtract:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		emit_trinary_func_op_bitextract(ops[0], ops[1], ops[2], ops[3], ops[4], "bitfieldExtract", uint_type, uint_type,
 		                                SPIRType::Int, SPIRType::Int);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpBitReverse:
+#ifndef SPIRV_CROSS_WEBMIN
 		// BitReverse does not have issues with sign since result type must match input type.
 		GLSL_UFOP(bitfieldReverse);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 
 	case OpBitCount:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		auto basetype = expression_type(ops[2]).basetype;
 		emit_unary_func_op_cast(ops[0], ops[1], ops[2], "bitCount", basetype, int_type);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	// Atomics
 	case OpAtomicExchange:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
 		uint32_t ptr = ops[2];
@@ -13521,11 +13730,15 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		const char *op = check_atomic_image(ptr) ? "imageAtomicExchange" : "atomicExchange";
 
 		emit_atomic_func_op(result_type, id, ptr, val, op);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpAtomicCompareExchange:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
 		uint32_t ptr = ops[2];
@@ -13534,11 +13747,15 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		const char *op = check_atomic_image(ptr) ? "imageAtomicCompSwap" : "atomicCompSwap";
 
 		emit_atomic_func_op(result_type, id, ptr, comp, val, op);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpAtomicLoad:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		// In plain GLSL, we have no atomic loads, so emulate this by fetch adding by 0 and hope compiler figures it out.
 		// Alternatively, we could rely on KHR_memory_model, but that's not very helpful for GL.
 		auto &type = expression_type(ops[2]);
@@ -13552,11 +13769,15 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		        join(op, "(",
 		             to_non_uniform_aware_expression(ops[2]), ", ", increment, ")"), false);
 		flush_all_atomic_capable_variables();
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpAtomicStore:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		// In plain GLSL, we have no atomic stores, so emulate this with an atomic exchange where we don't consume the result.
 		// Alternatively, we could rely on KHR_memory_model, but that's not very helpful for GL.
 		uint32_t ptr = ops[0];
@@ -13565,12 +13786,16 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		const char *op = check_atomic_image(ptr) ? "imageAtomicExchange" : "atomicExchange";
 		statement(op, "(", to_non_uniform_aware_expression(ptr), ", ", to_expression(val), ");");
 		flush_all_atomic_capable_variables();
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpAtomicIIncrement:
 	case OpAtomicIDecrement:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		forced_temporaries.insert(ops[1]);
 		auto &type = expression_type(ops[2]);
 		if (type.storage == StorageClassAtomicCounter)
@@ -13603,75 +13828,115 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		}
 
 		flush_all_atomic_capable_variables();
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpAtomicIAdd:
 	case OpAtomicFAddEXT:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		const char *op = check_atomic_image(ops[2]) ? "imageAtomicAdd" : "atomicAdd";
 		emit_atomic_func_op(ops[0], ops[1], ops[2], ops[5], op);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpAtomicISub:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		const char *op = check_atomic_image(ops[2]) ? "imageAtomicAdd" : "atomicAdd";
 		forced_temporaries.insert(ops[1]);
 		auto expr = join(op, "(", to_non_uniform_aware_expression(ops[2]), ", -", to_enclosed_expression(ops[5]), ")");
 		emit_op(ops[0], ops[1], expr, should_forward(ops[2]) && should_forward(ops[5]));
 		flush_all_atomic_capable_variables();
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpAtomicSMin:
 	case OpAtomicUMin:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		const char *op = check_atomic_image(ops[2]) ? "imageAtomicMin" : "atomicMin";
 		emit_atomic_func_op(ops[0], ops[1], ops[2], ops[5], op);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpAtomicSMax:
 	case OpAtomicUMax:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		const char *op = check_atomic_image(ops[2]) ? "imageAtomicMax" : "atomicMax";
 		emit_atomic_func_op(ops[0], ops[1], ops[2], ops[5], op);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpAtomicAnd:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		const char *op = check_atomic_image(ops[2]) ? "imageAtomicAnd" : "atomicAnd";
 		emit_atomic_func_op(ops[0], ops[1], ops[2], ops[5], op);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpAtomicOr:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		const char *op = check_atomic_image(ops[2]) ? "imageAtomicOr" : "atomicOr";
 		emit_atomic_func_op(ops[0], ops[1], ops[2], ops[5], op);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpAtomicXor:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		const char *op = check_atomic_image(ops[2]) ? "imageAtomicXor" : "atomicXor";
 		emit_atomic_func_op(ops[0], ops[1], ops[2], ops[5], op);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	// Geometry shaders
 	case OpEmitVertex:
+#ifndef SPIRV_CROSS_WEBMIN
 		statement("EmitVertex();");
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 
 	case OpEndPrimitive:
+#ifndef SPIRV_CROSS_WEBMIN
 		statement("EndPrimitive();");
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 
 	case OpEmitStreamVertex:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		if (options.es)
 			SPIRV_CROSS_THROW("Multi-stream geometry shaders not supported in ES.");
 		else if (!options.es && options.version < 400)
@@ -13681,11 +13946,15 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		if (expression_type(ops[0]).basetype != SPIRType::Int)
 			stream_expr = join("int(", stream_expr, ")");
 		statement("EmitStreamVertex(", stream_expr, ");");
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpEndStreamPrimitive:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		if (options.es)
 			SPIRV_CROSS_THROW("Multi-stream geometry shaders not supported in ES.");
 		else if (!options.es && options.version < 400)
@@ -13695,6 +13964,9 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		if (expression_type(ops[0]).basetype != SPIRType::Int)
 			stream_expr = join("int(", stream_expr, ")");
 		statement("EndStreamPrimitive(", stream_expr, ");");
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
@@ -13725,19 +13997,28 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 	case OpImageSparseFetch:
 	case OpImageSparseGather:
 	case OpImageSparseDrefGather:
+#ifndef SPIRV_CROSS_WEBMIN
 		// Gets a bit hairy, so move this to a separate instruction.
 		emit_texture_op(instruction, true);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 
 	case OpImageSparseTexelsResident:
+#ifndef SPIRV_CROSS_WEBMIN
 		if (options.es)
 			SPIRV_CROSS_THROW("Sparse feedback is not supported in GLSL.");
 		require_extension_internal("GL_ARB_sparse_texture2");
 		emit_unary_func_op_cast(ops[0], ops[1], ops[2], "sparseTexelsResidentARB", int_type, SPIRType::Boolean);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 
 	case OpImage:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
 
@@ -13747,11 +14028,15 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		// When using the image, we need to know which variable it is actually loaded from.
 		auto *var = maybe_get_backing_variable(ops[2]);
 		e.loaded_from = var ? var->self : ID(0);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpImageQueryLod:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		const char *op = nullptr;
 		if (!options.es && options.version < 400)
 		{
@@ -13785,11 +14070,15 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		inherit_expression_dependencies(ops[1], ops[2]);
 		inherit_expression_dependencies(ops[1], ops[3]);
 		register_control_dependent_expression(ops[1]);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpImageQueryLevels:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
 
@@ -13802,11 +14091,15 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		auto &restype = get<SPIRType>(ops[0]);
 		expr = bitcast_expression(restype, SPIRType::Int, expr);
 		emit_op(result_type, id, expr, true);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpImageQuerySamples:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		auto &type = expression_type(ops[2]);
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
@@ -13825,6 +14118,9 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		auto &restype = get<SPIRType>(ops[0]);
 		expr = bitcast_expression(restype, SPIRType::Int, expr);
 		emit_op(result_type, id, expr, true);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
@@ -13840,6 +14136,7 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 
 	case OpImageQuerySizeLod:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
 		uint32_t img = ops[2];
@@ -13864,6 +14161,9 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		auto &restype = get<SPIRType>(ops[0]);
 		expr = bitcast_expression(restype, SPIRType::Int, expr);
 		emit_op(result_type, id, expr, true);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
@@ -13871,6 +14171,7 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 	case OpImageRead:
 	case OpImageSparseRead:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		// We added Nonreadable speculatively to the OpImage variable due to glslangValidator
 		// not adding the proper qualifiers.
 		// If it turns out we need to read the image after all, remove the qualifier and recompile.
@@ -14042,11 +14343,15 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		inherit_expression_dependencies(id, ops[2]);
 		if (type.image.ms)
 			inherit_expression_dependencies(id, ops[5]);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpImageTexelPointer:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
 
@@ -14062,11 +14367,15 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		auto *var = maybe_get_backing_variable(ops[2]);
 		e.loaded_from = var ? var->self : ID(0);
 		inherit_expression_dependencies(id, ops[3]);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpImageWrite:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		// We added Nonwritable speculatively to the OpImage variable due to glslangValidator
 		// not adding the proper qualifiers.
 		// If it turns out we need to write to the image after all, remove the qualifier and recompile.
@@ -14110,11 +14419,15 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 
 		if (var && variable_storage_is_aliased(*var))
 			flush_all_aliased_variables();
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpImageQuerySize:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		auto &type = expression_type(ops[2]);
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
@@ -14150,6 +14463,9 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		}
 		else
 			SPIRV_CROSS_THROW("Invalid type for OpImageQuerySize.");
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
@@ -14157,6 +14473,7 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 	case OpControlBarrier:
 	case OpMemoryBarrier:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t execution_scope = 0;
 		uint32_t memory;
 		uint32_t semantics;
@@ -14317,6 +14634,9 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 			else
 				statement("barrier();");
 		}
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
@@ -14381,6 +14701,7 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 	// Legacy sub-group stuff ...
 	case OpSubgroupBallotKHR:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
 		string expr;
@@ -14390,73 +14711,100 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		require_extension_internal("GL_ARB_shader_ballot");
 		inherit_expression_dependencies(id, ops[2]);
 		register_control_dependent_expression(ops[1]);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpSubgroupFirstInvocationKHR:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
 		emit_unary_func_op(result_type, id, ops[2], "readFirstInvocationARB");
 
 		require_extension_internal("GL_ARB_shader_ballot");
 		register_control_dependent_expression(ops[1]);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpSubgroupReadInvocationKHR:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
 		emit_binary_func_op(result_type, id, ops[2], ops[3], "readInvocationARB");
 
 		require_extension_internal("GL_ARB_shader_ballot");
 		register_control_dependent_expression(ops[1]);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpSubgroupAllKHR:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
 		emit_unary_func_op(result_type, id, ops[2], "allInvocationsARB");
 
 		require_extension_internal("GL_ARB_shader_group_vote");
 		register_control_dependent_expression(ops[1]);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpSubgroupAnyKHR:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
 		emit_unary_func_op(result_type, id, ops[2], "anyInvocationARB");
 
 		require_extension_internal("GL_ARB_shader_group_vote");
 		register_control_dependent_expression(ops[1]);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpSubgroupAllEqualKHR:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
 		emit_unary_func_op(result_type, id, ops[2], "allInvocationsEqualARB");
 
 		require_extension_internal("GL_ARB_shader_group_vote");
 		register_control_dependent_expression(ops[1]);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpGroupIAddNonUniformAMD:
 	case OpGroupFAddNonUniformAMD:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
 		emit_unary_func_op(result_type, id, ops[4], "addInvocationsNonUniformAMD");
 
 		require_extension_internal("GL_AMD_shader_ballot");
 		register_control_dependent_expression(ops[1]);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
@@ -14464,12 +14812,16 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 	case OpGroupUMinNonUniformAMD:
 	case OpGroupSMinNonUniformAMD:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
 		emit_unary_func_op(result_type, id, ops[4], "minInvocationsNonUniformAMD");
 
 		require_extension_internal("GL_AMD_shader_ballot");
 		register_control_dependent_expression(ops[1]);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
@@ -14477,17 +14829,22 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 	case OpGroupUMaxNonUniformAMD:
 	case OpGroupSMaxNonUniformAMD:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
 		emit_unary_func_op(result_type, id, ops[4], "maxInvocationsNonUniformAMD");
 
 		require_extension_internal("GL_AMD_shader_ballot");
 		register_control_dependent_expression(ops[1]);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpFragmentMaskFetchAMD:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		auto &type = expression_type(ops[2]);
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
@@ -14502,11 +14859,15 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		}
 
 		require_extension_internal("GL_AMD_shader_fragment_mask");
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpFragmentFetchAMD:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		auto &type = expression_type(ops[2]);
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
@@ -14521,6 +14882,9 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		}
 
 		require_extension_internal("GL_AMD_shader_fragment_mask");
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
@@ -14559,7 +14923,11 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 	case OpGroupNonUniformLogicalXor:
 	case OpGroupNonUniformQuadSwap:
 	case OpGroupNonUniformQuadBroadcast:
+#ifndef SPIRV_CROSS_WEBMIN
 		emit_subgroup_op(instruction);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 
 	case OpFUnordEqual:
@@ -14568,6 +14936,7 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 	case OpFUnordLessThanEqual:
 	case OpFUnordGreaterThanEqual:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		// GLSL doesn't specify if floating point comparisons are ordered or unordered,
 		// but glslang always emits ordered floating point compares for GLSL.
 		// To get unordered compares, we can test the opposite thing and invert the result.
@@ -14644,10 +15013,14 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		emit_op(ops[0], ops[1], expr, should_forward(op0) && should_forward(op1));
 		inherit_expression_dependencies(ops[1], op0);
 		inherit_expression_dependencies(ops[1], op1);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpReportIntersectionKHR:
+#ifndef SPIRV_CROSS_WEBMIN
 		// NV is same opcode.
 		forced_temporaries.insert(ops[1]);
 		if (ray_tracing_is_khr)
@@ -14655,25 +15028,41 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		else
 			GLSL_BFOP(reportIntersectionNV);
 		flush_control_dependent_expressions(current_emitting_block->self);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	case OpIgnoreIntersectionNV:
+#ifndef SPIRV_CROSS_WEBMIN
 		// KHR variant is a terminator.
 		statement("ignoreIntersectionNV();");
 		flush_control_dependent_expressions(current_emitting_block->self);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	case OpTerminateRayNV:
+#ifndef SPIRV_CROSS_WEBMIN
 		// KHR variant is a terminator.
 		statement("terminateRayNV();");
 		flush_control_dependent_expressions(current_emitting_block->self);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	case OpTraceNV:
+#ifndef SPIRV_CROSS_WEBMIN
 		statement("traceNV(", to_non_uniform_aware_expression(ops[0]), ", ", to_expression(ops[1]), ", ", to_expression(ops[2]), ", ",
 		          to_expression(ops[3]), ", ", to_expression(ops[4]), ", ", to_expression(ops[5]), ", ",
 		          to_expression(ops[6]), ", ", to_expression(ops[7]), ", ", to_expression(ops[8]), ", ",
 		          to_expression(ops[9]), ", ", to_expression(ops[10]), ");");
 		flush_control_dependent_expressions(current_emitting_block->self);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	case OpTraceRayKHR:
+#ifndef SPIRV_CROSS_WEBMIN
 		if (!has_decoration(ops[10], DecorationLocation))
 			SPIRV_CROSS_THROW("A memory declaration object must be used in TraceRayKHR.");
 		statement("traceRayEXT(", to_non_uniform_aware_expression(ops[0]), ", ", to_expression(ops[1]), ", ", to_expression(ops[2]), ", ",
@@ -14681,42 +15070,73 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		          to_expression(ops[6]), ", ", to_expression(ops[7]), ", ", to_expression(ops[8]), ", ",
 		          to_expression(ops[9]), ", ", get_decoration(ops[10], DecorationLocation), ");");
 		flush_control_dependent_expressions(current_emitting_block->self);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	case OpExecuteCallableNV:
+#ifndef SPIRV_CROSS_WEBMIN
 		statement("executeCallableNV(", to_expression(ops[0]), ", ", to_expression(ops[1]), ");");
 		flush_control_dependent_expressions(current_emitting_block->self);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	case OpExecuteCallableKHR:
+#ifndef SPIRV_CROSS_WEBMIN
 		if (!has_decoration(ops[1], DecorationLocation))
 			SPIRV_CROSS_THROW("A memory declaration object must be used in ExecuteCallableKHR.");
 		statement("executeCallableEXT(", to_expression(ops[0]), ", ", get_decoration(ops[1], DecorationLocation), ");");
 		flush_control_dependent_expressions(current_emitting_block->self);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 
 		// Don't bother forwarding temporaries. Avoids having to test expression invalidation with ray query objects.
 	case OpRayQueryInitializeKHR:
+#ifndef SPIRV_CROSS_WEBMIN
 		flush_variable_declaration(ops[0]);
 		statement("rayQueryInitializeEXT(",
 		          to_expression(ops[0]), ", ", to_expression(ops[1]), ", ",
 		          to_expression(ops[2]), ", ", to_expression(ops[3]), ", ",
 		          to_expression(ops[4]), ", ", to_expression(ops[5]), ", ",
 		          to_expression(ops[6]), ", ", to_expression(ops[7]), ");");
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	case OpRayQueryProceedKHR:
+#ifndef SPIRV_CROSS_WEBMIN
 		flush_variable_declaration(ops[0]);
 		emit_op(ops[0], ops[1], join("rayQueryProceedEXT(", to_expression(ops[2]), ")"), false);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	case OpRayQueryTerminateKHR:
+#ifndef SPIRV_CROSS_WEBMIN
 		flush_variable_declaration(ops[0]);
 		statement("rayQueryTerminateEXT(", to_expression(ops[0]), ");");
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	case OpRayQueryGenerateIntersectionKHR:
+#ifndef SPIRV_CROSS_WEBMIN
 		flush_variable_declaration(ops[0]);
 		statement("rayQueryGenerateIntersectionEXT(", to_expression(ops[0]), ", ", to_expression(ops[1]), ");");
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	case OpRayQueryConfirmIntersectionKHR:
+#ifndef SPIRV_CROSS_WEBMIN
 		flush_variable_declaration(ops[0]);
 		statement("rayQueryConfirmIntersectionEXT(", to_expression(ops[0]), ");");
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 #define GLSL_RAY_QUERY_GET_OP(op) \
 	case OpRayQueryGet##op##KHR: \
@@ -14751,6 +15171,7 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 
 	case OpConvertUToAccelerationStructureKHR:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		require_extension_internal("GL_EXT_ray_tracing");
 
 		bool elide_temporary = should_forward(ops[2]) && forced_temporaries.count(ops[1]) == 0 &&
@@ -14772,11 +15193,15 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 			// Use raw SPIRExpression interface to block all usage tracking.
 			set<SPIRExpression>(ops[1], join("accelerationStructureEXT(", to_name(ops[1]), ")"), ops[0], true);
 		}
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpConvertUToPtr:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		auto &type = get<SPIRType>(ops[0]);
 		if (type.storage != StorageClassPhysicalStorageBufferEXT)
 			SPIRV_CROSS_THROW("Only StorageClassPhysicalStorageBufferEXT is supported by OpConvertUToPtr.");
@@ -14787,11 +15212,15 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 
 		auto op = type_to_glsl(type);
 		emit_unary_func_op(ops[0], ops[1], ops[2], op.c_str());
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
 	case OpConvertPtrToU:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		auto &type = get<SPIRType>(ops[0]);
 		auto &ptr_type = expression_type(ops[2]);
 		if (ptr_type.storage != StorageClassPhysicalStorageBufferEXT)
@@ -14802,6 +15231,9 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 
 		auto op = type_to_glsl(type);
 		emit_unary_func_op(ops[0], ops[1], ops[2], op.c_str());
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
@@ -14819,22 +15251,31 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		break;
 
 	case OpDemoteToHelperInvocationEXT:
+#ifndef SPIRV_CROSS_WEBMIN
 		if (!options.vulkan_semantics)
 			SPIRV_CROSS_THROW("GL_EXT_demote_to_helper_invocation is only supported in Vulkan GLSL.");
 		require_extension_internal("GL_EXT_demote_to_helper_invocation");
 		statement(backend.demote_literal, ";");
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 
 	case OpIsHelperInvocationEXT:
+#ifndef SPIRV_CROSS_WEBMIN
 		if (!options.vulkan_semantics)
 			SPIRV_CROSS_THROW("GL_EXT_demote_to_helper_invocation is only supported in Vulkan GLSL.");
 		require_extension_internal("GL_EXT_demote_to_helper_invocation");
 		// Helper lane state with demote is volatile by nature.
 		// Do not forward this.
 		emit_op(ops[0], ops[1], "helperInvocationEXT()", false);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 
 	case OpBeginInvocationInterlockEXT:
+#ifndef SPIRV_CROSS_WEBMIN
 		// If the interlock is complex, we emit this elsewhere.
 		if (!interlocked_is_complex)
 		{
@@ -14842,9 +15283,13 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 			flush_all_active_variables();
 			// Make sure forwarding doesn't propagate outside interlock region.
 		}
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 
 	case OpEndInvocationInterlockEXT:
+#ifndef SPIRV_CROSS_WEBMIN
 		// If the interlock is complex, we emit this elsewhere.
 		if (!interlocked_is_complex)
 		{
@@ -14852,14 +15297,22 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 			flush_all_active_variables();
 			// Make sure forwarding doesn't propagate outside interlock region.
 		}
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 
 	case OpSetMeshOutputsEXT:
+#ifndef SPIRV_CROSS_WEBMIN
 		statement("SetMeshOutputsEXT(", to_unpacked_expression(ops[0]), ", ", to_unpacked_expression(ops[1]), ");");
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 
 	case OpReadClockKHR:
 	{
+#ifndef SPIRV_CROSS_WEBMIN
 		auto &type = get<SPIRType>(ops[0]);
 		auto scope = static_cast<Scope>(evaluate_constant_u32(ops[2]));
 		const char *op = nullptr;
@@ -14891,6 +15344,9 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 			SPIRV_CROSS_THROW("Unsupported scope for OpReadClockKHR opcode.");
 
 		emit_op(ops[0], ops[1], op, false);
+#else
+		SPIRV_CROSS_INVALID_CALL();
+#endif
 		break;
 	}
 
@@ -19618,8 +20074,6 @@ void CompilerHLSL::emit_spv_amd_gcn_shader_op(uint32_t result_type, uint32_t id,
 	}
 }
 #else
-#define SPIRV_CROSS_INVALID_CALL() assert(false);
-
 CompilerHLSL::ShaderSubgroupSupportHelper::Result::Result()
 {
 	SPIRV_CROSS_INVALID_CALL();
