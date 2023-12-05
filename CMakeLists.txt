@@ -81,7 +81,7 @@ set(spirv-cross-link-flags "")
 
 if(SPIRV_CROSS_ENABLE_WEBMIN)
     set(spirv-public-compiler-defines "-DSPIRV_CROSS_WEBMIN")
-	if(SPIRV_CROSS_ENABLE_WEBMIN_DEVEL)
+    if(SPIRV_CROSS_ENABLE_WEBMIN_DEVEL)
         set(spirv-public-compiler-defines "-DSPIRV_CROSS_WEBMIN_DEVEL")
     endif()
 endif()
