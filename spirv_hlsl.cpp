@@ -18845,13 +18845,8 @@ std::string CompilerHLSL::convert_double_to_string(const SPIRConstant &c, uint32
 			require_extension_internal("GL_ARB_gpu_shader_int64");
 
 			char print_buffer[64];
-#ifdef _WIN32
-			sprintf(print_buffer, "0x%llx%s", static_cast<unsigned long long>(u64_value),
-			        backend.long_long_literal_suffix ? "ull" : "ul");
-#else
 			snprintf(print_buffer, sizeof(print_buffer), "0x%llx%s", static_cast<unsigned long long>(u64_value),
 			         backend.long_long_literal_suffix ? "ull" : "ul");
-#endif
 
 			const char *comment = "inf";
 			if (double_value == -numeric_limits<double>::infinity())
