@@ -14875,6 +14875,20 @@ void CompilerMSL::emit_function(SPIRFunction &func, const Bitset &return_flags)
 	}
 }
 
+bool CompilerMSL::variable_is_lut(const SPIRVariable &var) const
+{
+	bool statically_assigned = var.statically_assigned && var.static_expression != ID(0) && var.remapped_variable;
+
+	if (statically_assigned)
+	{
+		auto *constant = maybe_get<SPIRConstant>(var.static_expression);
+		if (constant && constant->is_used_as_lut)
+			return true;
+	}
+
+	return false;
+}
+
 bool CompilerMSL::is_stage_output_variable_masked(const SPIRVariable &var) const
 {
 	auto &type = get<SPIRType>(var.basetype);
@@ -27038,21 +27052,6 @@ void CompilerMSL::add_header_line(const std::string &line)
 	header_lines.push_back(line);
 }
 
-bool CompilerMSL::variable_is_lut(const SPIRVariable &var) const
-{
-	bool statically_assigned = var.statically_assigned && var.static_expression != ID(0) && var.remapped_variable;
-
-	if (statically_assigned)
-	{
-		auto *constant = maybe_get<SPIRConstant>(var.static_expression);
-		if (constant && constant->is_used_as_lut)
-			return true;
-	}
-
-	return false;
-}
-
-
 uint32_t CompilerMSL::get_declared_member_location(const SPIRVariable &var, uint32_t mbr_idx, bool strip_array) const
 {
 	auto &block_type = get<SPIRType>(var.basetype);
@@ -30417,7 +30416,7 @@ void CompilerMSL::set_fragment_output_components(uint32_t location, uint32_t com
 {
 	fragment_output_components[location] = components;
 }
-#else
+#else // SPIRV_CROSS_WEBMIN 
 void CompilerMSL::store_flattened_struct(const string &, uint32_t, const SPIRType &,
                                           const SmallVector<uint32_t> &)
 {
@@ -31046,13 +31045,6 @@ void CompilerMSL::add_header_line(const std::string &line)
 	SPIRV_CROSS_THROW("Invalid call.");
 }
 
-bool CompilerMSL::variable_is_lut(const SPIRVariable &) const
-{
-	SPIRV_CROSS_INVALID_CALL();
-	SPIRV_CROSS_THROW("Invalid call.");
-}
-
-
 uint32_t CompilerMSL::get_declared_member_location(const SPIRVariable &, uint32_t, bool) const
 {
 	SPIRV_CROSS_INVALID_CALL();
@@ -31627,4 +31619,4 @@ void CompilerMSL::set_fragment_output_components(uint32_t, uint32_t)
 	SPIRV_CROSS_INVALID_CALL();
 	SPIRV_CROSS_THROW("Invalid call.");
 }
-#endif
+#endif // SPIRV_CROSS_WEBMIN

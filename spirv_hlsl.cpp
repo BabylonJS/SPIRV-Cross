@@ -2559,7 +2559,7 @@ void CompilerHLSL::emit_resources()
 		end_scope();
 		statement("");
 	}
-	#endif
+#endif // SPIRV_CROSS_WEBMIN
 
 	for (TypeID type_id : composite_selection_workaround_types)
 	{
@@ -6473,6 +6473,20 @@ bool CompilerHLSL::is_per_primitive_variable(const SPIRVariable &var) const
 			return false;
 
 	return true;
+}
+
+bool CompilerHLSL::variable_is_lut(const SPIRVariable &var) const
+{
+	bool statically_assigned = var.statically_assigned && var.static_expression != ID(0) && var.remapped_variable;
+
+	if (statically_assigned)
+	{
+		auto *constant = maybe_get<SPIRConstant>(var.static_expression);
+		if (constant && constant->is_used_as_lut)
+			return true;
+	}
+
+	return false;
 }
 
 void CompilerHLSL::flush_variable_declaration(uint32_t id)
@@ -18055,20 +18069,6 @@ uint32_t CompilerHLSL::get_declared_member_location(const SPIRVariable &var, uin
 		return get_accumulated_member_location(var, mbr_idx, strip_array);
 }
 
-bool CompilerHLSL::variable_is_lut(const SPIRVariable &var) const
-{
-	bool statically_assigned = var.statically_assigned && var.static_expression != ID(0) && var.remapped_variable;
-
-	if (statically_assigned)
-	{
-		auto *constant = maybe_get<SPIRConstant>(var.static_expression);
-		if (constant && constant->is_used_as_lut)
-			return true;
-	}
-
-	return false;
-}
-
 void CompilerHLSL::emit_buffer_block_flattened(const SPIRVariable &var)
 {
 	auto &type = get<SPIRType>(var.basetype);
@@ -20512,12 +20512,6 @@ void CompilerHLSL::fixup_implicit_builtin_block_names(ExecutionModel)
 }
 
 uint32_t CompilerHLSL::get_declared_member_location(const SPIRVariable &, uint32_t, bool) const
-{
-	SPIRV_CROSS_INVALID_CALL();
-	SPIRV_CROSS_THROW("Invalid call.");
-}
-
-bool CompilerHLSL::variable_is_lut(const SPIRVariable &) const
 {
 	SPIRV_CROSS_INVALID_CALL();
 	SPIRV_CROSS_THROW("Invalid call.");
