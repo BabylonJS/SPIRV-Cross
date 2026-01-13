@@ -13207,7 +13207,6 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		break;
 
 	case OpTranspose:
-#ifndef SPIRV_CROSS_WEBMIN
 		if (options.version < 120) // Matches GLSL 1.10 / ESSL 1.00
 		{
 			// transpose() is not available, so instead, flip need_transpose,
@@ -13234,9 +13233,6 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		}
 		else
 			GLSL_UFOP(transpose);
-#else
-		SPIRV_CROSS_INVALID_CALL();
-#endif
 		break;
 
 	case OpSRem:
@@ -13674,7 +13670,6 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 	case OpConvertFToU:
 	case OpConvertFToS:
 	{
-#ifndef SPIRV_CROSS_WEBMIN
 		// Cast to expected arithmetic type, then potentially bitcast away to desired signedness.
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
@@ -13686,9 +13681,6 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 
 		auto func = type_to_glsl_constructor(expected_type);
 		emit_unary_func_op_cast(result_type, id, ops[2], func.c_str(), float_type.basetype, expected_type.basetype);
-#else
-		SPIRV_CROSS_INVALID_CALL();
-#endif
 		break;
 	}
 
