@@ -4606,7 +4606,6 @@ void CompilerHLSL::emit_instruction(const Instruction &instruction)
 	}
 	case OpBitcast:
 	{
-//#ifndef SPIRV_CROSS_WEBMIN
 		auto bitcast_type = get_bitcast_type(ops[0], ops[2]);
 		if (bitcast_type == CompilerHLSL::TypeNormal)
 			CompilerGLSL_emit_instruction(instruction);
@@ -4623,9 +4622,6 @@ void CompilerHLSL::emit_instruction(const Instruction &instruction)
 			else
 				emit_unary_func_op(ops[0], ops[1], ops[2], "spvUnpackUint2x32");
 		}
-/* #else
-		SPIRV_CROSS_INVALID_CALL();
-#endif*/
 		break;
 	}
 
