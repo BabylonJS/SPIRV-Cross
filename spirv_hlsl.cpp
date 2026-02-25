@@ -4606,7 +4606,7 @@ void CompilerHLSL::emit_instruction(const Instruction &instruction)
 	}
 	case OpBitcast:
 	{
-#ifndef SPIRV_CROSS_WEBMIN
+//#ifndef SPIRV_CROSS_WEBMIN
 		auto bitcast_type = get_bitcast_type(ops[0], ops[2]);
 		if (bitcast_type == CompilerHLSL::TypeNormal)
 			CompilerGLSL_emit_instruction(instruction);
@@ -4623,9 +4623,9 @@ void CompilerHLSL::emit_instruction(const Instruction &instruction)
 			else
 				emit_unary_func_op(ops[0], ops[1], ops[2], "spvUnpackUint2x32");
 		}
-#else
+/* #else
 		SPIRV_CROSS_INVALID_CALL();
-#endif
+#endif*/
 		break;
 	}
 
@@ -4748,7 +4748,6 @@ void CompilerHLSL::emit_instruction(const Instruction &instruction)
 
 	case OpImage:
 	{
-#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
 		auto *combined = maybe_get<SPIRCombinedImageSampler>(ops[2]);
@@ -4767,9 +4766,6 @@ void CompilerHLSL::emit_instruction(const Instruction &instruction)
 			if (var)
 				e.loaded_from = var->self;
 		}
-#else
-		SPIRV_CROSS_INVALID_CALL();
-#endif
 		break;
 	}
 
@@ -13700,7 +13696,6 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 
 	case OpBitcast:
 	{
-#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
 		uint32_t arg = ops[2];
@@ -13710,9 +13705,6 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 			auto op = bitcast_glsl_op(get<SPIRType>(result_type), expression_type(arg));
 			emit_unary_func_op(result_type, id, arg, op.c_str());
 		}
-#else
-		SPIRV_CROSS_INVALID_CALL();
-#endif
 		break;
 	}
 
@@ -16599,66 +16591,6 @@ void CompilerHLSL::emit_legacy_uniform(const SPIRVariable &var)
 	}
 }
 
-string CompilerHLSL::bitcast_glsl_op(const SPIRType &out_type, const SPIRType &in_type)
-{
-	if (out_type.basetype == SPIRType::UInt && in_type.basetype == SPIRType::Int)
-		return type_to_glsl(out_type);
-	else if (out_type.basetype == SPIRType::UInt64 && in_type.basetype == SPIRType::Int64)
-		return type_to_glsl(out_type);
-	else if (out_type.basetype == SPIRType::UInt && in_type.basetype == SPIRType::Float)
-		return "asuint";
-	else if (out_type.basetype == SPIRType::Int && in_type.basetype == SPIRType::UInt)
-		return type_to_glsl(out_type);
-	else if (out_type.basetype == SPIRType::Int64 && in_type.basetype == SPIRType::UInt64)
-		return type_to_glsl(out_type);
-	else if (out_type.basetype == SPIRType::Int && in_type.basetype == SPIRType::Float)
-		return "asint";
-	else if (out_type.basetype == SPIRType::Float && in_type.basetype == SPIRType::UInt)
-		return "asfloat";
-	else if (out_type.basetype == SPIRType::Float && in_type.basetype == SPIRType::Int)
-		return "asfloat";
-	else if (out_type.basetype == SPIRType::Int64 && in_type.basetype == SPIRType::Double)
-		SPIRV_CROSS_THROW("Double to Int64 is not supported in HLSL.");
-	else if (out_type.basetype == SPIRType::UInt64 && in_type.basetype == SPIRType::Double)
-		SPIRV_CROSS_THROW("Double to UInt64 is not supported in HLSL.");
-	else if (out_type.basetype == SPIRType::Double && in_type.basetype == SPIRType::Int64)
-		return "asdouble";
-	else if (out_type.basetype == SPIRType::Double && in_type.basetype == SPIRType::UInt64)
-		return "asdouble";
-	else if (out_type.basetype == SPIRType::Half && in_type.basetype == SPIRType::UInt && in_type.vecsize == 1)
-	{
-		if (!requires_explicit_fp16_packing)
-		{
-			requires_explicit_fp16_packing = true;
-			force_recompile();
-		}
-		return "spvUnpackFloat2x16";
-	}
-	else if (out_type.basetype == SPIRType::UInt && in_type.basetype == SPIRType::Half && in_type.vecsize == 2)
-	{
-		if (!requires_explicit_fp16_packing)
-		{
-			requires_explicit_fp16_packing = true;
-			force_recompile();
-		}
-		return "spvPackFloat2x16";
-	}
-	else if (out_type.basetype == SPIRType::UShort && in_type.basetype == SPIRType::Half)
-	{
-		if (hlsl_options.shader_model < 40)
-			SPIRV_CROSS_THROW("Half to UShort requires Shader Model 4.");
-		return "(" + type_to_glsl(out_type) + ")f32tof16";
-	}
-	else if (out_type.basetype == SPIRType::Half && in_type.basetype == SPIRType::UShort)
-	{
-		if (hlsl_options.shader_model < 40)
-			SPIRV_CROSS_THROW("UShort to Half requires Shader Model 4.");
-		return "(" + type_to_glsl(out_type) + ")f16tof32";
-	}
-	else
-		return "";
-}
-
 void CompilerHLSL::read_access_chain_array(const string &lhs, const SPIRAccessChain &chain)
 {
 	auto &type = get<SPIRType>(chain.basetype);
@@ -17672,21 +17604,6 @@ bool CompilerHLSL::is_hlsl_resource_binding_used(ExecutionModel model, uint32_t 
 	StageSetBinding tuple = { model, desc_set, binding };
 	auto itr = resource_bindings.find(tuple);
 	return itr != end(resource_bindings) && itr->second.second;
-}
-
-CompilerHLSL::BitcastType CompilerHLSL::get_bitcast_type(uint32_t result_type, uint32_t op0)
-{
-	auto &rslt_type = get<SPIRType>(result_type);
-	auto &expr_type = expression_type(op0);
-
-	if (rslt_type.basetype == SPIRType::BaseType::UInt64 && expr_type.basetype == SPIRType::BaseType::UInt &&
-	    expr_type.vecsize == 2)
-		return BitcastType::TypePackUint2x32;
-	else if (rslt_type.basetype == SPIRType::BaseType::UInt && rslt_type.vecsize == 2 &&
-	         expr_type.basetype == SPIRType::BaseType::UInt64)
-		return BitcastType::TypeUnpackUint64;
-
-	return BitcastType::TypeNormal;
 }
 
 bool CompilerHLSL::is_hlsl_force_storage_buffer_as_uav(ID id) const
@@ -20274,6 +20191,83 @@ void CompilerHLSL::emit_spv_amd_gcn_shader_op(uint32_t result_type, uint32_t id,
 	}
 }
 #else
+
+CompilerHLSL::BitcastType CompilerHLSL::get_bitcast_type(uint32_t result_type, uint32_t op0)
+{
+	auto &rslt_type = get<SPIRType>(result_type);
+	auto &expr_type = expression_type(op0);
+
+	if (rslt_type.basetype == SPIRType::BaseType::UInt64 && expr_type.basetype == SPIRType::BaseType::UInt &&
+	    expr_type.vecsize == 2)
+		return BitcastType::TypePackUint2x32;
+	else if (rslt_type.basetype == SPIRType::BaseType::UInt && rslt_type.vecsize == 2 &&
+	         expr_type.basetype == SPIRType::BaseType::UInt64)
+		return BitcastType::TypeUnpackUint64;
+
+	return BitcastType::TypeNormal;
+}
+
+
+string CompilerHLSL::bitcast_glsl_op(const SPIRType &out_type, const SPIRType &in_type)
+{
+	if (out_type.basetype == SPIRType::UInt && in_type.basetype == SPIRType::Int)
+		return type_to_glsl(out_type);
+	else if (out_type.basetype == SPIRType::UInt64 && in_type.basetype == SPIRType::Int64)
+		return type_to_glsl(out_type);
+	else if (out_type.basetype == SPIRType::UInt && in_type.basetype == SPIRType::Float)
+		return "asuint";
+	else if (out_type.basetype == SPIRType::Int && in_type.basetype == SPIRType::UInt)
+		return type_to_glsl(out_type);
+	else if (out_type.basetype == SPIRType::Int64 && in_type.basetype == SPIRType::UInt64)
+		return type_to_glsl(out_type);
+	else if (out_type.basetype == SPIRType::Int && in_type.basetype == SPIRType::Float)
+		return "asint";
+	else if (out_type.basetype == SPIRType::Float && in_type.basetype == SPIRType::UInt)
+		return "asfloat";
+	else if (out_type.basetype == SPIRType::Float && in_type.basetype == SPIRType::Int)
+		return "asfloat";
+	else if (out_type.basetype == SPIRType::Int64 && in_type.basetype == SPIRType::Double)
+		SPIRV_CROSS_THROW("Double to Int64 is not supported in HLSL.");
+	else if (out_type.basetype == SPIRType::UInt64 && in_type.basetype == SPIRType::Double)
+		SPIRV_CROSS_THROW("Double to UInt64 is not supported in HLSL.");
+	else if (out_type.basetype == SPIRType::Double && in_type.basetype == SPIRType::Int64)
+		return "asdouble";
+	else if (out_type.basetype == SPIRType::Double && in_type.basetype == SPIRType::UInt64)
+		return "asdouble";
+	else if (out_type.basetype == SPIRType::Half && in_type.basetype == SPIRType::UInt && in_type.vecsize == 1)
+	{
+		if (!requires_explicit_fp16_packing)
+		{
+			requires_explicit_fp16_packing = true;
+			force_recompile();
+		}
+		return "spvUnpackFloat2x16";
+	}
+	else if (out_type.basetype == SPIRType::UInt && in_type.basetype == SPIRType::Half && in_type.vecsize == 2)
+	{
+		if (!requires_explicit_fp16_packing)
+		{
+			requires_explicit_fp16_packing = true;
+			force_recompile();
+		}
+		return "spvPackFloat2x16";
+	}
+	else if (out_type.basetype == SPIRType::UShort && in_type.basetype == SPIRType::Half)
+	{
+		if (hlsl_options.shader_model < 40)
+			SPIRV_CROSS_THROW("Half to UShort requires Shader Model 4.");
+		return "(" + type_to_glsl(out_type) + ")f32tof16";
+	}
+	else if (out_type.basetype == SPIRType::Half && in_type.basetype == SPIRType::UShort)
+	{
+		if (hlsl_options.shader_model < 40)
+			SPIRV_CROSS_THROW("UShort to Half requires Shader Model 4.");
+		return "(" + type_to_glsl(out_type) + ")f16tof32";
+	}
+	else
+		return "";
+}
+
 CompilerHLSL::ShaderSubgroupSupportHelper::Result::Result()
 {
 	SPIRV_CROSS_INVALID_CALL();
@@ -20356,12 +20350,6 @@ void CompilerHLSL::emit_push_constant_block(const SPIRVariable &)
 }
 
 void CompilerHLSL::emit_legacy_uniform(const SPIRVariable &)
-{
-	SPIRV_CROSS_INVALID_CALL();
-	SPIRV_CROSS_THROW("Invalid call.");
-}
-
-string CompilerHLSL::bitcast_glsl_op(const SPIRType &, const SPIRType &)
 {
 	SPIRV_CROSS_INVALID_CALL();
 	SPIRV_CROSS_THROW("Invalid call.");
@@ -20456,12 +20444,6 @@ void CompilerHLSL::add_hlsl_resource_binding(const HLSLResourceBinding &)
 }
 
 bool CompilerHLSL::is_hlsl_resource_binding_used(ExecutionModel, uint32_t, uint32_t) const
-{
-	SPIRV_CROSS_INVALID_CALL();
-	SPIRV_CROSS_THROW("Invalid call.");
-}
-
-CompilerHLSL::BitcastType CompilerHLSL::get_bitcast_type(uint32_t, uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
 	SPIRV_CROSS_THROW("Invalid call.");
