@@ -31,10 +31,7 @@ using namespace spv;
 using namespace SPIRV_CROSS_NAMESPACE;
 using namespace std;
 
-void InvalidCall() {
-	throw std::runtime_error("Invalid call");
-}
-#define SPIRV_CROSS_INVALID_CALL() InvalidCall();
+#define SPIRV_CROSS_INVALID_CALL() assert(false);
 
 enum ExtraSubExpressionType
 {
