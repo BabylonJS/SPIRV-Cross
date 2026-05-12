@@ -24275,6 +24275,313 @@ bool CompilerMSL::optimize_read_modify_write(const SPIRType &type, const string 
     return true;
 }
 
+bool CompilerMSL::emit_complex_bitcast(uint32_t, uint32_t, uint32_t)
+{
+	// This is handled from the outside where we deal with PtrToU/UToPtr and friends.
+	return false;
+}
+
+string CompilerMSL::bitcast_glsl_op(const SPIRType &out_type, const SPIRType &in_type)
+{
+	if (out_type.basetype == in_type.basetype)
+		return "";
+
+	assert(out_type.basetype != SPIRType::Boolean);
+	assert(in_type.basetype != SPIRType::Boolean);
+
+	bool integral_cast = type_is_integral(out_type) && type_is_integral(in_type) && (out_type.vecsize == in_type.vecsize);
+	bool same_size_cast = (out_type.width * out_type.vecsize) == (in_type.width * in_type.vecsize);
+
+	// Bitcasting can only be used between types of the same overall size.
+	// And always formally cast between integers, because it's trivial, and also
+	// because Metal can internally cast the results of some integer ops to a larger
+	// size (eg. short shift right becomes int), which means chaining integer ops
+	// together may introduce size variations that SPIR-V doesn't know about.
+	if (same_size_cast && !integral_cast)
+		return "as_type<" + type_to_glsl(out_type) + ">";
+	else
+		return type_to_glsl(out_type);
+}
+
+const char *CompilerMSL::descriptor_address_space(uint32_t id, StorageClass storage, const char *plain_address_space) const
+{
+	if (msl_options.argument_buffers)
+	{
+		bool storage_class_is_descriptor = storage == StorageClassUniform ||
+		                                   storage == StorageClassStorageBuffer ||
+		                                   storage == StorageClassUniformConstant;
+
+		uint32_t desc_set = get_decoration(id, DecorationDescriptorSet);
+		if (storage_class_is_descriptor && descriptor_set_is_argument_buffer(desc_set))
+		{
+			// An awkward case where we need to emit *more* address space declarations (yay!).
+			// An example is where we pass down an array of buffer pointers to leaf functions.
+			// It's a constant array containing pointers to constants.
+			// The pointer array is always constant however. E.g.
+			// device SSBO * constant (&array)[N].
+			// const device SSBO * constant (&array)[N].
+			// constant SSBO * constant (&array)[N].
+			// However, this only matters for argument buffers, since for MSL 1.0 style codegen,
+			// we emit the buffer array on stack instead, and that seems to work just fine apparently.
+
+			// If the argument was marked as being in device address space, any pointer to member would
+			// be const device, not constant.
+			if (argument_buffer_device_storage_mask & (1u << desc_set))
+				return "const device";
+			else
+				return "constant";
+		}
+	}
+
+	return plain_address_space;
+}
+
+bool CompilerMSL::emit_array_copy(const char *expr, uint32_t lhs_id, uint32_t rhs_id,
+								  StorageClass lhs_storage, StorageClass rhs_storage)
+{
+	// Allow Metal to use the array<T> template to make arrays a value type.
+	// This, however, cannot be used for threadgroup address specifiers, so consider the custom array copy as fallback.
+	bool lhs_is_thread_storage = storage_class_array_is_thread(lhs_storage);
+	bool rhs_is_thread_storage = storage_class_array_is_thread(rhs_storage);
+
+	bool lhs_is_array_template = lhs_is_thread_storage;
+	bool rhs_is_array_template = rhs_is_thread_storage;
+
+	// Special considerations for stage IO variables.
+	// If the variable is actually backed by non-user visible device storage, we use array templates for those.
+	//
+	// Another special consideration is given to thread local variables which happen to have Offset decorations
+	// applied to them. Block-like types do not use array templates, so we need to force POD path if we detect
+	// these scenarios. This check isn't perfect since it would be technically possible to mix and match these things,
+	// and for a fully correct solution we might have to track array template state through access chains as well,
+	// but for all reasonable use cases, this should suffice.
+	// This special case should also only apply to Function/Private storage classes.
+	// We should not check backing variable for temporaries.
+	auto *lhs_var = maybe_get_backing_variable(lhs_id);
+	if (lhs_var && lhs_storage == StorageClassStorageBuffer && storage_class_array_is_thread(lhs_var->storage))
+		lhs_is_array_template = true;
+	else if (lhs_var && (lhs_storage == StorageClassFunction || lhs_storage == StorageClassPrivate) &&
+	         type_is_block_like(get<SPIRType>(lhs_var->basetype)))
+		lhs_is_array_template = false;
+
+	auto *rhs_var = maybe_get_backing_variable(rhs_id);
+	if (rhs_var && rhs_storage == StorageClassStorageBuffer && storage_class_array_is_thread(rhs_var->storage))
+		rhs_is_array_template = true;
+	else if (rhs_var && (rhs_storage == StorageClassFunction || rhs_storage == StorageClassPrivate) &&
+	         type_is_block_like(get<SPIRType>(rhs_var->basetype)))
+		rhs_is_array_template = false;
+
+	// If threadgroup storage qualifiers are *not* used:
+	// Avoid spvCopy* wrapper functions; Otherwise, spvUnsafeArray<> template cannot be used with that storage qualifier.
+	if (lhs_is_array_template && rhs_is_array_template && !using_builtin_array())
+	{
+		// Fall back to normal copy path.
+		return false;
+	}
+	else
+	{
+		// Ensure the LHS variable has been declared
+		if (lhs_var)
+			flush_variable_declaration(lhs_var->self);
+
+		string lhs;
+		if (expr)
+			lhs = expr;
+		else
+			lhs = to_expression(lhs_id);
+
+		// Assignment from an array initializer is fine.
+		auto &type = expression_type(rhs_id);
+		auto *var = maybe_get_backing_variable(rhs_id);
+
+		// Unfortunately, we cannot template on address space in MSL,
+		// so explicit address space redirection it is ...
+		bool is_constant = false;
+		if (ir.ids[rhs_id].get_type() == TypeConstant)
+		{
+			is_constant = true;
+		}
+		else if (var && var->remapped_variable && var->statically_assigned &&
+		         ir.ids[var->static_expression].get_type() == TypeConstant)
+		{
+			is_constant = true;
+		}
+		else if (rhs_storage == StorageClassUniform || rhs_storage == StorageClassUniformConstant)
+		{
+			is_constant = true;
+		}
+
+		// For the case where we have OpLoad triggering an array copy,
+		// we cannot easily detect this case ahead of time since it's
+		// context dependent. We might have to force a recompile here
+		// if this is the only use of array copies in our shader.
+		if (type.array.size() > 1)
+		{
+			if (type.array.size() > kArrayCopyMultidimMax)
+				SPIRV_CROSS_THROW("Cannot support this many dimensions for arrays of arrays.");
+			auto func = static_cast<SPVFuncImpl>(SPVFuncImplArrayCopyMultidimBase + type.array.size());
+			add_spv_func_and_recompile(func);
+		}
+		else
+			add_spv_func_and_recompile(SPVFuncImplArrayCopy);
+
+		const char *tag = nullptr;
+		if (lhs_is_thread_storage && is_constant)
+			tag = "FromConstantToStack";
+		else if (lhs_storage == StorageClassWorkgroup && is_constant)
+			tag = "FromConstantToThreadGroup";
+		else if (lhs_is_thread_storage && rhs_is_thread_storage)
+			tag = "FromStackToStack";
+		else if (lhs_storage == StorageClassWorkgroup && rhs_is_thread_storage)
+			tag = "FromStackToThreadGroup";
+		else if (lhs_is_thread_storage && rhs_storage == StorageClassWorkgroup)
+			tag = "FromThreadGroupToStack";
+		else if (lhs_storage == StorageClassWorkgroup && rhs_storage == StorageClassWorkgroup)
+			tag = "FromThreadGroupToThreadGroup";
+		else if (lhs_storage == StorageClassStorageBuffer && rhs_storage == StorageClassStorageBuffer)
+			tag = "FromDeviceToDevice";
+		else if (lhs_storage == StorageClassStorageBuffer && is_constant)
+			tag = "FromConstantToDevice";
+		else if (lhs_storage == StorageClassStorageBuffer && rhs_storage == StorageClassWorkgroup)
+			tag = "FromThreadGroupToDevice";
+		else if (lhs_storage == StorageClassStorageBuffer && rhs_is_thread_storage)
+			tag = "FromStackToDevice";
+		else if (lhs_storage == StorageClassWorkgroup && rhs_storage == StorageClassStorageBuffer)
+			tag = "FromDeviceToThreadGroup";
+		else if (lhs_is_thread_storage && rhs_storage == StorageClassStorageBuffer)
+			tag = "FromDeviceToStack";
+		else
+			SPIRV_CROSS_THROW("Unknown storage class used for copying arrays.");
+
+		// Pass internal array of spvUnsafeArray<> into wrapper functions
+		if (lhs_is_array_template && rhs_is_array_template && !msl_options.force_native_arrays)
+			statement("spvArrayCopy", tag, type.array.size(), "(", lhs, ".elements, ", to_expression(rhs_id), ".elements);");
+		if (lhs_is_array_template && !msl_options.force_native_arrays)
+			statement("spvArrayCopy", tag, type.array.size(), "(", lhs, ".elements, ", to_expression(rhs_id), ");");
+		else if (rhs_is_array_template && !msl_options.force_native_arrays)
+			statement("spvArrayCopy", tag, type.array.size(), "(", lhs, ", ", to_expression(rhs_id), ".elements);");
+		else
+			statement("spvArrayCopy", tag, type.array.size(), "(", lhs, ", ", to_expression(rhs_id), ");");
+	}
+
+	return true;
+}
+
+void CompilerMSL::emit_binary_func_op_cast(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1,
+                                            const char *op, SPIRType::BaseType input_type, bool skip_cast_if_equal_type)
+{
+	string cast_op0, cast_op1;
+	auto expected_type = binary_op_bitcast_helper(cast_op0, cast_op1, input_type, op0, op1, skip_cast_if_equal_type);
+	auto &out_type = get<SPIRType>(result_type);
+
+	// Special case boolean outputs since relational opcodes output booleans instead of int/uint.
+	string expr;
+	if (out_type.basetype != input_type && out_type.basetype != SPIRType::Boolean)
+	{
+		expected_type.basetype = input_type;
+		expr = bitcast_glsl_op(out_type, expected_type);
+		expr += '(';
+		expr += join(op, "(", cast_op0, ", ", cast_op1, ")");
+		expr += ')';
+	}
+	else
+	{
+		expr += join(op, "(", cast_op0, ", ", cast_op1, ")");
+	}
+
+	emit_op(result_type, result_id, expr, should_forward(op0) && should_forward(op1));
+	inherit_expression_dependencies(result_id, op0);
+	inherit_expression_dependencies(result_id, op1);
+}
+
+void CompilerMSL::emit_trinary_func_op_cast(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1,
+                                             uint32_t op2, const char *op, SPIRType::BaseType input_type)
+{
+	auto &out_type = get<SPIRType>(result_type);
+	auto expected_type = out_type;
+	expected_type.basetype = input_type;
+	string cast_op0 =
+	    expression_type(op0).basetype != input_type ? bitcast_glsl(expected_type, op0) : to_unpacked_expression(op0);
+	string cast_op1 =
+	    expression_type(op1).basetype != input_type ? bitcast_glsl(expected_type, op1) : to_unpacked_expression(op1);
+	string cast_op2 =
+	    expression_type(op2).basetype != input_type ? bitcast_glsl(expected_type, op2) : to_unpacked_expression(op2);
+
+	string expr;
+	if (out_type.basetype != input_type)
+	{
+		expr = bitcast_glsl_op(out_type, expected_type);
+		expr += '(';
+		expr += join(op, "(", cast_op0, ", ", cast_op1, ", ", cast_op2, ")");
+		expr += ')';
+	}
+	else
+	{
+		expr += join(op, "(", cast_op0, ", ", cast_op1, ", ", cast_op2, ")");
+	}
+
+	emit_op(result_type, result_id, expr, should_forward(op0) && should_forward(op1) && should_forward(op2));
+	inherit_expression_dependencies(result_id, op0);
+	inherit_expression_dependencies(result_id, op1);
+	inherit_expression_dependencies(result_id, op2);
+}
+
+void CompilerMSL::emit_while_loop_initializers(const SPIRBlock &block)
+{
+	// While loops do not take initializers, so declare all of them outside.
+	for (auto &loop_var : block.loop_variables)
+	{
+		auto &var = get<SPIRVariable>(loop_var);
+		statement(variable_decl(var), ";");
+	}
+}
+
+void CompilerMSL::end_scope_decl(const string &decl)
+{
+	if (!indent)
+		SPIRV_CROSS_THROW("Popping empty indent stack.");
+	indent--;
+	statement("} ", decl, ";");
+}
+
+string CompilerMSL::to_extract_constant_composite_expression(uint32_t result_type, const SPIRConstant &c,
+                                                              const uint32_t *chain, uint32_t length)
+{
+	// It is kinda silly if application actually enter this path since they know the constant up front.
+	// It is useful here to extract the plain constant directly.
+	SPIRConstant tmp;
+	tmp.constant_type = result_type;
+	auto &composite_type = get<SPIRType>(c.constant_type);
+	assert(composite_type.basetype != SPIRType::Struct && composite_type.array.empty());
+	assert(!c.specialization);
+
+	if (is_matrix(composite_type))
+	{
+		if (length == 2)
+		{
+			tmp.m.c[0].vecsize = 1;
+			tmp.m.columns = 1;
+			tmp.m.c[0].r[0] = c.m.c[chain[0]].r[chain[1]];
+		}
+		else
+		{
+			assert(length == 1);
+			tmp.m.c[0].vecsize = composite_type.vecsize;
+			tmp.m.columns = 1;
+			tmp.m.c[0] = c.m.c[chain[0]];
+		}
+	}
+	else
+	{
+		assert(length == 1);
+		tmp.m.c[0].vecsize = 1;
+		tmp.m.columns = 1;
+		tmp.m.c[0].r[0] = c.m.c[0].r[chain[0]];
+	}
+
+	return constant_expression(tmp);
+}
+
 #ifndef SPIRV_CROSS_WEBMIN
 
 void CompilerMSL::store_flattened_struct(const string &basename, uint32_t rhs_id, const SPIRType &type,
@@ -24325,43 +24632,6 @@ void CompilerMSL::store_flattened_struct(uint32_t lhs_id, uint32_t value)
 }
 
 
-string CompilerMSL::to_extract_constant_composite_expression(uint32_t result_type, const SPIRConstant &c,
-                                                              const uint32_t *chain, uint32_t length)
-{
-	// It is kinda silly if application actually enter this path since they know the constant up front.
-	// It is useful here to extract the plain constant directly.
-	SPIRConstant tmp;
-	tmp.constant_type = result_type;
-	auto &composite_type = get<SPIRType>(c.constant_type);
-	assert(composite_type.basetype != SPIRType::Struct && composite_type.array.empty());
-	assert(!c.specialization);
-
-	if (is_matrix(composite_type))
-	{
-		if (length == 2)
-		{
-			tmp.m.c[0].vecsize = 1;
-			tmp.m.columns = 1;
-			tmp.m.c[0].r[0] = c.m.c[chain[0]].r[chain[1]];
-		}
-		else
-		{
-			assert(length == 1);
-			tmp.m.c[0].vecsize = composite_type.vecsize;
-			tmp.m.columns = 1;
-			tmp.m.c[0] = c.m.c[chain[0]];
-		}
-	}
-	else
-	{
-		assert(length == 1);
-		tmp.m.c[0].vecsize = 1;
-		tmp.m.columns = 1;
-		tmp.m.c[0].r[0] = c.m.c[0].r[chain[0]];
-	}
-
-	return constant_expression(tmp);
-}
 
 void CompilerMSL::emit_copy_logical_type(uint32_t lhs_id, uint32_t lhs_type_id, uint32_t rhs_id, uint32_t rhs_type_id,
                                           SmallVector<uint32_t> chain)
@@ -25748,64 +26018,7 @@ void CompilerMSL::emit_nminmax_op(uint32_t result_type, uint32_t id, uint32_t op
 }
 
 
-void CompilerMSL::emit_binary_func_op_cast(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1,
-                                            const char *op, SPIRType::BaseType input_type, bool skip_cast_if_equal_type)
-{
-	string cast_op0, cast_op1;
-	auto expected_type = binary_op_bitcast_helper(cast_op0, cast_op1, input_type, op0, op1, skip_cast_if_equal_type);
-	auto &out_type = get<SPIRType>(result_type);
 
-	// Special case boolean outputs since relational opcodes output booleans instead of int/uint.
-	string expr;
-	if (out_type.basetype != input_type && out_type.basetype != SPIRType::Boolean)
-	{
-		expected_type.basetype = input_type;
-		expr = bitcast_glsl_op(out_type, expected_type);
-		expr += '(';
-		expr += join(op, "(", cast_op0, ", ", cast_op1, ")");
-		expr += ')';
-	}
-	else
-	{
-		expr += join(op, "(", cast_op0, ", ", cast_op1, ")");
-	}
-
-	emit_op(result_type, result_id, expr, should_forward(op0) && should_forward(op1));
-	inherit_expression_dependencies(result_id, op0);
-	inherit_expression_dependencies(result_id, op1);
-}
-
-void CompilerMSL::emit_trinary_func_op_cast(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1,
-                                             uint32_t op2, const char *op, SPIRType::BaseType input_type)
-{
-	auto &out_type = get<SPIRType>(result_type);
-	auto expected_type = out_type;
-	expected_type.basetype = input_type;
-	string cast_op0 =
-	    expression_type(op0).basetype != input_type ? bitcast_glsl(expected_type, op0) : to_unpacked_expression(op0);
-	string cast_op1 =
-	    expression_type(op1).basetype != input_type ? bitcast_glsl(expected_type, op1) : to_unpacked_expression(op1);
-	string cast_op2 =
-	    expression_type(op2).basetype != input_type ? bitcast_glsl(expected_type, op2) : to_unpacked_expression(op2);
-
-	string expr;
-	if (out_type.basetype != input_type)
-	{
-		expr = bitcast_glsl_op(out_type, expected_type);
-		expr += '(';
-		expr += join(op, "(", cast_op0, ", ", cast_op1, ", ", cast_op2, ")");
-		expr += ')';
-	}
-	else
-	{
-		expr += join(op, "(", cast_op0, ", ", cast_op1, ", ", cast_op2, ")");
-	}
-
-	emit_op(result_type, result_id, expr, should_forward(op0) && should_forward(op1) && should_forward(op2));
-	inherit_expression_dependencies(result_id, op0);
-	inherit_expression_dependencies(result_id, op1);
-	inherit_expression_dependencies(result_id, op2);
-}
 
 void CompilerMSL::emit_emulated_ahyper_op(uint32_t result_type, uint32_t id, uint32_t op0, GLSLstd450 op)
 {
@@ -26105,15 +26318,6 @@ void CompilerMSL::forward_relaxed_precision(uint32_t dst_id, const uint32_t *arg
 		set_decoration(dst_id, DecorationRelaxedPrecision);
 }
 
-void CompilerMSL::emit_while_loop_initializers(const SPIRBlock &block)
-{
-	// While loops do not take initializers, so declare all of them outside.
-	for (auto &loop_var : block.loop_variables)
-	{
-		auto &var = get<SPIRVariable>(loop_var);
-		statement(variable_decl(var), ";");
-	}
-}
 
 
 void CompilerMSL::emit_line_directive(uint32_t file_id, uint32_t line_literal)
@@ -27062,12 +27266,6 @@ uint32_t CompilerMSL::get_declared_member_location(const SPIRVariable &var, uint
 }
 
 
-void CompilerMSL::end_scope_decl(const string &decl)
-{
-	if (!indent)
-		SPIRV_CROSS_THROW("Popping empty indent stack.");
-	indent--;
-	statement("} ", decl, ";");
 }
 
 void CompilerMSL::end_scope(const string &trailer)
@@ -28120,33 +28318,7 @@ case OpGroupNonUniform##op: \
 	register_control_dependent_expression(id);
 }
 
-string CompilerMSL::bitcast_glsl_op(const SPIRType &out_type, const SPIRType &in_type)
-{
-	if (out_type.basetype == in_type.basetype)
-		return "";
 
-	assert(out_type.basetype != SPIRType::Boolean);
-	assert(in_type.basetype != SPIRType::Boolean);
-
-	bool integral_cast = type_is_integral(out_type) && type_is_integral(in_type) && (out_type.vecsize == in_type.vecsize);
-	bool same_size_cast = (out_type.width * out_type.vecsize) == (in_type.width * in_type.vecsize);
-
-	// Bitcasting can only be used between types of the same overall size.
-	// And always formally cast between integers, because it's trivial, and also
-	// because Metal can internally cast the results of some integer ops to a larger
-	// size (eg. short shift right becomes int), which means chaining integer ops
-	// together may introduce size variations that SPIR-V doesn't know about.
-	if (same_size_cast && !integral_cast)
-		return "as_type<" + type_to_glsl(out_type) + ">";
-	else
-		return type_to_glsl(out_type);
-}
-
-bool CompilerMSL::emit_complex_bitcast(uint32_t, uint32_t, uint32_t)
-{
-	// This is handled from the outside where we deal with PtrToU/UToPtr and friends.
-	return false;
-}
 
 string CompilerMSL::constant_op_expression(const SPIRConstantOp &cop)
 {
@@ -28168,38 +28340,6 @@ bool CompilerMSL::type_is_pointer_to_pointer(const SPIRType &type) const
 	return type.pointer_depth > parent_type.pointer_depth && type_is_pointer(parent_type);
 }
 
-const char *CompilerMSL::descriptor_address_space(uint32_t id, StorageClass storage, const char *plain_address_space) const
-{
-	if (msl_options.argument_buffers)
-	{
-		bool storage_class_is_descriptor = storage == StorageClassUniform ||
-		                                   storage == StorageClassStorageBuffer ||
-		                                   storage == StorageClassUniformConstant;
-
-		uint32_t desc_set = get_decoration(id, DecorationDescriptorSet);
-		if (storage_class_is_descriptor && descriptor_set_is_argument_buffer(desc_set))
-		{
-			// An awkward case where we need to emit *more* address space declarations (yay!).
-			// An example is where we pass down an array of buffer pointers to leaf functions.
-			// It's a constant array containing pointers to constants.
-			// The pointer array is always constant however. E.g.
-			// device SSBO * constant (&array)[N].
-			// const device SSBO * constant (&array)[N].
-			// constant SSBO * constant (&array)[N].
-			// However, this only matters for argument buffers, since for MSL 1.0 style codegen,
-			// we emit the buffer array on stack instead, and that seems to work just fine apparently.
-
-			// If the argument was marked as being in device address space, any pointer to member would
-			// be const device, not constant.
-			if (argument_buffer_device_storage_mask & (1u << desc_set))
-				return "const device";
-			else
-				return "constant";
-		}
-	}
-
-	return plain_address_space;
-}
 
 string CompilerMSL::entry_point_args_argument_buffer(bool append_comma)
 {
@@ -28717,136 +28857,6 @@ void CompilerMSL::emit_barrier(uint32_t id_exe_scope, uint32_t id_mem_scope, uin
 	flush_all_active_variables();
 }
 
-bool CompilerMSL::emit_array_copy(const char *expr, uint32_t lhs_id, uint32_t rhs_id,
-								  StorageClass lhs_storage, StorageClass rhs_storage)
-{
-	// Allow Metal to use the array<T> template to make arrays a value type.
-	// This, however, cannot be used for threadgroup address specifiers, so consider the custom array copy as fallback.
-	bool lhs_is_thread_storage = storage_class_array_is_thread(lhs_storage);
-	bool rhs_is_thread_storage = storage_class_array_is_thread(rhs_storage);
-
-	bool lhs_is_array_template = lhs_is_thread_storage;
-	bool rhs_is_array_template = rhs_is_thread_storage;
-
-	// Special considerations for stage IO variables.
-	// If the variable is actually backed by non-user visible device storage, we use array templates for those.
-	//
-	// Another special consideration is given to thread local variables which happen to have Offset decorations
-	// applied to them. Block-like types do not use array templates, so we need to force POD path if we detect
-	// these scenarios. This check isn't perfect since it would be technically possible to mix and match these things,
-	// and for a fully correct solution we might have to track array template state through access chains as well,
-	// but for all reasonable use cases, this should suffice.
-	// This special case should also only apply to Function/Private storage classes.
-	// We should not check backing variable for temporaries.
-	auto *lhs_var = maybe_get_backing_variable(lhs_id);
-	if (lhs_var && lhs_storage == StorageClassStorageBuffer && storage_class_array_is_thread(lhs_var->storage))
-		lhs_is_array_template = true;
-	else if (lhs_var && (lhs_storage == StorageClassFunction || lhs_storage == StorageClassPrivate) &&
-	         type_is_block_like(get<SPIRType>(lhs_var->basetype)))
-		lhs_is_array_template = false;
-
-	auto *rhs_var = maybe_get_backing_variable(rhs_id);
-	if (rhs_var && rhs_storage == StorageClassStorageBuffer && storage_class_array_is_thread(rhs_var->storage))
-		rhs_is_array_template = true;
-	else if (rhs_var && (rhs_storage == StorageClassFunction || rhs_storage == StorageClassPrivate) &&
-	         type_is_block_like(get<SPIRType>(rhs_var->basetype)))
-		rhs_is_array_template = false;
-
-	// If threadgroup storage qualifiers are *not* used:
-	// Avoid spvCopy* wrapper functions; Otherwise, spvUnsafeArray<> template cannot be used with that storage qualifier.
-	if (lhs_is_array_template && rhs_is_array_template && !using_builtin_array())
-	{
-		// Fall back to normal copy path.
-		return false;
-	}
-	else
-	{
-		// Ensure the LHS variable has been declared
-		if (lhs_var)
-			flush_variable_declaration(lhs_var->self);
-
-		string lhs;
-		if (expr)
-			lhs = expr;
-		else
-			lhs = to_expression(lhs_id);
-
-		// Assignment from an array initializer is fine.
-		auto &type = expression_type(rhs_id);
-		auto *var = maybe_get_backing_variable(rhs_id);
-
-		// Unfortunately, we cannot template on address space in MSL,
-		// so explicit address space redirection it is ...
-		bool is_constant = false;
-		if (ir.ids[rhs_id].get_type() == TypeConstant)
-		{
-			is_constant = true;
-		}
-		else if (var && var->remapped_variable && var->statically_assigned &&
-		         ir.ids[var->static_expression].get_type() == TypeConstant)
-		{
-			is_constant = true;
-		}
-		else if (rhs_storage == StorageClassUniform || rhs_storage == StorageClassUniformConstant)
-		{
-			is_constant = true;
-		}
-
-		// For the case where we have OpLoad triggering an array copy,
-		// we cannot easily detect this case ahead of time since it's
-		// context dependent. We might have to force a recompile here
-		// if this is the only use of array copies in our shader.
-		if (type.array.size() > 1)
-		{
-			if (type.array.size() > kArrayCopyMultidimMax)
-				SPIRV_CROSS_THROW("Cannot support this many dimensions for arrays of arrays.");
-			auto func = static_cast<SPVFuncImpl>(SPVFuncImplArrayCopyMultidimBase + type.array.size());
-			add_spv_func_and_recompile(func);
-		}
-		else
-			add_spv_func_and_recompile(SPVFuncImplArrayCopy);
-
-		const char *tag = nullptr;
-		if (lhs_is_thread_storage && is_constant)
-			tag = "FromConstantToStack";
-		else if (lhs_storage == StorageClassWorkgroup && is_constant)
-			tag = "FromConstantToThreadGroup";
-		else if (lhs_is_thread_storage && rhs_is_thread_storage)
-			tag = "FromStackToStack";
-		else if (lhs_storage == StorageClassWorkgroup && rhs_is_thread_storage)
-			tag = "FromStackToThreadGroup";
-		else if (lhs_is_thread_storage && rhs_storage == StorageClassWorkgroup)
-			tag = "FromThreadGroupToStack";
-		else if (lhs_storage == StorageClassWorkgroup && rhs_storage == StorageClassWorkgroup)
-			tag = "FromThreadGroupToThreadGroup";
-		else if (lhs_storage == StorageClassStorageBuffer && rhs_storage == StorageClassStorageBuffer)
-			tag = "FromDeviceToDevice";
-		else if (lhs_storage == StorageClassStorageBuffer && is_constant)
-			tag = "FromConstantToDevice";
-		else if (lhs_storage == StorageClassStorageBuffer && rhs_storage == StorageClassWorkgroup)
-			tag = "FromThreadGroupToDevice";
-		else if (lhs_storage == StorageClassStorageBuffer && rhs_is_thread_storage)
-			tag = "FromStackToDevice";
-		else if (lhs_storage == StorageClassWorkgroup && rhs_storage == StorageClassStorageBuffer)
-			tag = "FromDeviceToThreadGroup";
-		else if (lhs_is_thread_storage && rhs_storage == StorageClassStorageBuffer)
-			tag = "FromDeviceToStack";
-		else
-			SPIRV_CROSS_THROW("Unknown storage class used for copying arrays.");
-
-		// Pass internal array of spvUnsafeArray<> into wrapper functions
-		if (lhs_is_array_template && rhs_is_array_template && !msl_options.force_native_arrays)
-			statement("spvArrayCopy", tag, type.array.size(), "(", lhs, ".elements, ", to_expression(rhs_id), ".elements);");
-		if (lhs_is_array_template && !msl_options.force_native_arrays)
-			statement("spvArrayCopy", tag, type.array.size(), "(", lhs, ".elements, ", to_expression(rhs_id), ");");
-		else if (rhs_is_array_template && !msl_options.force_native_arrays)
-			statement("spvArrayCopy", tag, type.array.size(), "(", lhs, ", ", to_expression(rhs_id), ".elements);");
-		else
-			statement("spvArrayCopy", tag, type.array.size(), "(", lhs, ", ", to_expression(rhs_id), ");");
-	}
-
-	return true;
-}
 
 uint32_t CompilerMSL::get_physical_tess_level_array_size(spv::BuiltIn builtin) const
 {
@@ -30437,12 +30447,6 @@ void CompilerMSL::store_flattened_struct(uint32_t, uint32_t)
 }
 
 
-string CompilerMSL::to_extract_constant_composite_expression(uint32_t, const SPIRConstant &,
-                                                              const uint32_t *, uint32_t )
-{
-	SPIRV_CROSS_INVALID_CALL();
-	SPIRV_CROSS_THROW("Invalid call.");
-}
 
 void CompilerMSL::emit_copy_logical_type(uint32_t, uint32_t, uint32_t, uint32_t,
                                           SmallVector<uint32_t>)
@@ -30731,19 +30735,7 @@ void CompilerMSL::emit_nminmax_op(uint32_t, uint32_t, uint32_t, uint32_t, GLSLst
 }
 
 
-void CompilerMSL::emit_binary_func_op_cast(uint32_t, uint32_t, uint32_t, uint32_t,
-                                            const char *, SPIRType::BaseType, bool)
-{
-	SPIRV_CROSS_INVALID_CALL();
-	SPIRV_CROSS_THROW("Invalid call.");
-}
 
-void CompilerMSL::emit_trinary_func_op_cast(uint32_t, uint32_t, uint32_t, uint32_t,
-                                             uint32_t, const char *, SPIRType::BaseType)
-{
-	SPIRV_CROSS_INVALID_CALL();
-	SPIRV_CROSS_THROW("Invalid call.");
-}
 
 void CompilerMSL::emit_emulated_ahyper_op(uint32_t, uint32_t, uint32_t, GLSLstd450)
 {
@@ -30803,11 +30795,6 @@ void CompilerMSL::forward_relaxed_precision(uint32_t, const uint32_t *, uint32_t
 	SPIRV_CROSS_THROW("Invalid call.");
 }
 
-void CompilerMSL::emit_while_loop_initializers(const SPIRBlock &)
-{
-	SPIRV_CROSS_INVALID_CALL();
-	SPIRV_CROSS_THROW("Invalid call.");
-}
 
 
 void CompilerMSL::emit_line_directive(uint32_t, uint32_t)
@@ -31052,11 +31039,6 @@ uint32_t CompilerMSL::get_declared_member_location(const SPIRVariable &, uint32_
 }
 
 
-void CompilerMSL::end_scope_decl(const string &)
-{
-	SPIRV_CROSS_INVALID_CALL();
-	SPIRV_CROSS_THROW("Invalid call.");
-}
 
 void CompilerMSL::end_scope(const string &)
 {
@@ -31219,17 +31201,7 @@ void CompilerMSL::emit_subgroup_op(const Instruction &)
 	SPIRV_CROSS_THROW("Invalid call.");
 }
 
-string CompilerMSL::bitcast_glsl_op(const SPIRType &, const SPIRType &)
-{
-	SPIRV_CROSS_INVALID_CALL();
-	SPIRV_CROSS_THROW("Invalid call.");
-}
 
-bool CompilerMSL::emit_complex_bitcast(uint32_t, uint32_t, uint32_t)
-{
-	SPIRV_CROSS_INVALID_CALL();
-	SPIRV_CROSS_THROW("Invalid call.");
-}
 
 string CompilerMSL::constant_op_expression(const SPIRConstantOp &)
 {
@@ -31243,11 +31215,6 @@ bool CompilerMSL::type_is_pointer_to_pointer(const SPIRType &) const
 	SPIRV_CROSS_THROW("Invalid call.");
 }
 
-const char *CompilerMSL::descriptor_address_space(uint32_t, StorageClass, const char *) const
-{
-	SPIRV_CROSS_INVALID_CALL();
-	SPIRV_CROSS_THROW("Invalid call.");
-}
 
 string CompilerMSL::entry_point_args_argument_buffer(bool)
 {
@@ -31331,12 +31298,6 @@ void CompilerMSL::emit_barrier(uint32_t, uint32_t, uint32_t)
 	SPIRV_CROSS_THROW("Invalid call.");
 }
 
-bool CompilerMSL::emit_array_copy(const char *, uint32_t, uint32_t,
-								  StorageClass, StorageClass)
-{
-	SPIRV_CROSS_INVALID_CALL();
-	SPIRV_CROSS_THROW("Invalid call.");
-}
 
 uint32_t CompilerMSL::get_physical_tess_level_array_size(spv::BuiltIn) const
 {

@@ -4721,16 +4721,12 @@ void CompilerHLSL::emit_instruction(const Instruction &instruction)
 
 	case OpFMod:
 	{
-#ifndef SPIRV_CROSS_WEBMIN
 		if (!requires_op_fmod)
 		{
 			requires_op_fmod = true;
 			force_recompile();
 		}
 		CompilerGLSL_emit_instruction(instruction);
-#else
-		SPIRV_CROSS_INVALID_CALL();
-#endif
 		break;
 	}
 
@@ -4814,12 +4810,8 @@ void CompilerHLSL::emit_instruction(const Instruction &instruction)
 	case OpFwidth:
 	case OpFwidthCoarse:
 	case OpFwidthFine:
-#ifndef SPIRV_CROSS_WEBMIN
 		HLSL_UFOP(fwidth);
 		register_control_dependent_expression(ops[1]);
-#else
-		SPIRV_CROSS_INVALID_CALL();
-#endif
 		break;
 
 	case OpLogicalNot:
@@ -12955,7 +12947,6 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 
 	// ALU
 	case OpIsNan:
-#ifndef SPIRV_CROSS_WEBMIN
 		if (!is_legacy())
 			GLSL_UFOP(isnan);
 		else
@@ -12967,13 +12958,9 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 			else
 				emit_binary_op(ops[0], ops[1], ops[2], ops[2], "!=");
 		}
-#else
-		SPIRV_CROSS_INVALID_CALL();
-#endif
 		break;
 
 	case OpIsInf:
-#ifndef SPIRV_CROSS_WEBMIN
 		if (!is_legacy())
 			GLSL_UFOP(isinf);
 		else
@@ -13011,9 +12998,6 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 
 			inherit_expression_dependencies(result_id, operand);
 		}
-#else
-		SPIRV_CROSS_INVALID_CALL();
-#endif
 		break;
 
 	case OpSNegate:
@@ -13412,7 +13396,6 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 
 	case OpLogicalOr:
 	{
-#ifndef SPIRV_CROSS_WEBMIN
 		// No vector variant in GLSL for logical OR.
 		auto result_type = ops[0];
 		auto id = ops[1];
@@ -13422,15 +13405,11 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 			emit_unrolled_binary_op(result_type, id, ops[2], ops[3], "||", false, SPIRType::Unknown);
 		else
 			GLSL_BOP(||);
-#else
-		SPIRV_CROSS_INVALID_CALL();
-#endif
 		break;
 	}
 
 	case OpLogicalAnd:
 	{
-#ifndef SPIRV_CROSS_WEBMIN
 		// No vector variant in GLSL for logical AND.
 		auto result_type = ops[0];
 		auto id = ops[1];
@@ -13440,9 +13419,6 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 			emit_unrolled_binary_op(result_type, id, ops[2], ops[3], "&&", false, SPIRType::Unknown);
 		else
 			GLSL_BOP(&&);
-#else
-		SPIRV_CROSS_INVALID_CALL();
-#endif
 		break;
 	}
 
@@ -16313,6 +16289,189 @@ std::string CompilerHLSL::bitcast_expression(const SPIRType &target_type, SPIRTy
 	return join(bitcast_glsl_op(target_type, src_type), "(", expr, ")");
 }
 
+void CompilerHLSL::emit_binary_func_op_cast(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1,
+                                            const char *op, SPIRType::BaseType input_type, bool skip_cast_if_equal_type)
+{
+	string cast_op0, cast_op1;
+	auto expected_type = binary_op_bitcast_helper(cast_op0, cast_op1, input_type, op0, op1, skip_cast_if_equal_type);
+	auto &out_type = get<SPIRType>(result_type);
+
+	// Special case boolean outputs since relational opcodes output booleans instead of int/uint.
+	string expr;
+	if (out_type.basetype != input_type && out_type.basetype != SPIRType::Boolean)
+	{
+		expected_type.basetype = input_type;
+		expr = bitcast_glsl_op(out_type, expected_type);
+		expr += '(';
+		expr += join(op, "(", cast_op0, ", ", cast_op1, ")");
+		expr += ')';
+	}
+	else
+	{
+		expr += join(op, "(", cast_op0, ", ", cast_op1, ")");
+	}
+
+	emit_op(result_type, result_id, expr, should_forward(op0) && should_forward(op1));
+	inherit_expression_dependencies(result_id, op0);
+	inherit_expression_dependencies(result_id, op1);
+}
+
+void CompilerHLSL::emit_trinary_func_op_cast(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1,
+                                             uint32_t op2, const char *op, SPIRType::BaseType input_type)
+{
+	auto &out_type = get<SPIRType>(result_type);
+	auto expected_type = out_type;
+	expected_type.basetype = input_type;
+	string cast_op0 =
+	    expression_type(op0).basetype != input_type ? bitcast_glsl(expected_type, op0) : to_unpacked_expression(op0);
+	string cast_op1 =
+	    expression_type(op1).basetype != input_type ? bitcast_glsl(expected_type, op1) : to_unpacked_expression(op1);
+	string cast_op2 =
+	    expression_type(op2).basetype != input_type ? bitcast_glsl(expected_type, op2) : to_unpacked_expression(op2);
+
+	string expr;
+	if (out_type.basetype != input_type)
+	{
+		expr = bitcast_glsl_op(out_type, expected_type);
+		expr += '(';
+		expr += join(op, "(", cast_op0, ", ", cast_op1, ", ", cast_op2, ")");
+		expr += ')';
+	}
+	else
+	{
+		expr += join(op, "(", cast_op0, ", ", cast_op1, ", ", cast_op2, ")");
+	}
+
+	emit_op(result_type, result_id, expr, should_forward(op0) && should_forward(op1) && should_forward(op2));
+	inherit_expression_dependencies(result_id, op0);
+	inherit_expression_dependencies(result_id, op1);
+	inherit_expression_dependencies(result_id, op2);
+}
+
+void CompilerHLSL::emit_emulated_ahyper_op(uint32_t result_type, uint32_t id, uint32_t op0, GLSLstd450 op)
+{
+	const char *one = backend.float_literal_suffix ? "1.0f" : "1.0";
+	std::string expr;
+	bool forward = should_forward(op0);
+
+	switch (op)
+	{
+	case GLSLstd450Asinh:
+		expr = join("log(", to_enclosed_expression(op0), " + sqrt(", to_enclosed_expression(op0), " * ",
+		            to_enclosed_expression(op0), " + ", one, "))");
+		emit_op(result_type, id, expr, forward);
+		break;
+
+	case GLSLstd450Acosh:
+		expr = join("log(", to_enclosed_expression(op0), " + sqrt(", to_enclosed_expression(op0), " * ",
+		            to_enclosed_expression(op0), " - ", one, "))");
+		break;
+
+	case GLSLstd450Atanh:
+		expr = join("log((", one, " + ", to_enclosed_expression(op0),
+		            ") / "
+		            "(",
+		            one, " - ", to_enclosed_expression(op0), ")) * 0.5", backend.float_literal_suffix ? "f" : "");
+		break;
+
+	default:
+		SPIRV_CROSS_THROW("Invalid op.");
+	}
+
+	emit_op(result_type, id, expr, forward);
+	inherit_expression_dependencies(id, op0);
+}
+
+void CompilerHLSL::emit_unrolled_binary_op(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1,
+                                           const char *op, bool negate, SPIRType::BaseType expected_type)
+{
+	auto &type0 = expression_type(op0);
+	auto &type1 = expression_type(op1);
+
+	SPIRType target_type0 = type0;
+	SPIRType target_type1 = type1;
+	target_type0.basetype = expected_type;
+	target_type1.basetype = expected_type;
+	target_type0.vecsize = 1;
+	target_type1.vecsize = 1;
+
+	auto &type = get<SPIRType>(result_type);
+	auto expr = type_to_glsl_constructor(type);
+	expr += '(';
+	for (uint32_t i = 0; i < type.vecsize; i++)
+	{
+		// Make sure to call to_expression multiple times to ensure
+		// that these expressions are properly flushed to temporaries if needed.
+		if (negate)
+			expr += "!(";
+
+		if (expected_type != SPIRType::Unknown && type0.basetype != expected_type)
+			expr += bitcast_expression(target_type0, type0.basetype, to_extract_component_expression(op0, i));
+		else
+			expr += to_extract_component_expression(op0, i);
+
+		expr += ' ';
+		expr += op;
+		expr += ' ';
+
+		if (expected_type != SPIRType::Unknown && type1.basetype != expected_type)
+			expr += bitcast_expression(target_type1, type1.basetype, to_extract_component_expression(op1, i));
+		else
+			expr += to_extract_component_expression(op1, i);
+
+		if (negate)
+			expr += ")";
+
+		if (i + 1 < type.vecsize)
+			expr += ", ";
+	}
+	expr += ')';
+	emit_op(result_type, result_id, expr, should_forward(op0) && should_forward(op1));
+
+	inherit_expression_dependencies(result_id, op0);
+	inherit_expression_dependencies(result_id, op1);
+}
+
+string CompilerHLSL::to_extract_component_expression(uint32_t id, uint32_t index)
+{
+	auto expr = to_enclosed_expression(id);
+	if (has_extended_decoration(id, SPIRVCrossDecorationPhysicalTypePacked))
+		return join(expr, "[", index, "]");
+	else
+		return join(expr, ".", index_to_swizzle(index));
+}
+
+void CompilerHLSL::emit_unrolled_unary_op(uint32_t result_type, uint32_t result_id, uint32_t operand, const char *op)
+{
+	auto &type = get<SPIRType>(result_type);
+	auto expr = type_to_glsl_constructor(type);
+	expr += '(';
+	for (uint32_t i = 0; i < type.vecsize; i++)
+	{
+		// Make sure to call to_expression multiple times to ensure
+		// that these expressions are properly flushed to temporaries if needed.
+		expr += op;
+		expr += to_extract_component_expression(operand, i);
+
+		if (i + 1 < type.vecsize)
+			expr += ", ";
+	}
+	expr += ')';
+	emit_op(result_type, result_id, expr, should_forward(operand));
+
+	inherit_expression_dependencies(result_id, operand);
+}
+
+void CompilerHLSL::emit_while_loop_initializers(const SPIRBlock &block)
+{
+	// While loops do not take initializers, so declare all of them outside.
+	for (auto &loop_var : block.loop_variables)
+	{
+		auto &var = get<SPIRVariable>(loop_var);
+		statement(variable_decl(var), ";");
+	}
+}
+
 #ifndef SPIRV_CROSS_WEBMIN
 CompilerHLSL::ShaderSubgroupSupportHelper::Result::Result()
 {
@@ -18160,48 +18319,6 @@ string CompilerHLSL::to_combined_image_sampler(VariableID image_id, VariableID s
 	}
 }
 
-string CompilerHLSL::to_extract_component_expression(uint32_t id, uint32_t index)
-{
-	auto expr = to_enclosed_expression(id);
-	if (has_extended_decoration(id, SPIRVCrossDecorationPhysicalTypePacked))
-		return join(expr, "[", index, "]");
-	else
-		return join(expr, ".", index_to_swizzle(index));
-}
-
-void CompilerHLSL::emit_emulated_ahyper_op(uint32_t result_type, uint32_t id, uint32_t op0, GLSLstd450 op)
-{
-	const char *one = backend.float_literal_suffix ? "1.0f" : "1.0";
-	std::string expr;
-	bool forward = should_forward(op0);
-
-	switch (op)
-	{
-	case GLSLstd450Asinh:
-		expr = join("log(", to_enclosed_expression(op0), " + sqrt(",
-		            to_enclosed_expression(op0), " * ", to_enclosed_expression(op0), " + ", one, "))");
-		emit_op(result_type, id, expr, forward);
-		break;
-
-	case GLSLstd450Acosh:
-		expr = join("log(", to_enclosed_expression(op0), " + sqrt(",
-		            to_enclosed_expression(op0), " * ", to_enclosed_expression(op0), " - ", one, "))");
-		break;
-
-	case GLSLstd450Atanh:
-		expr = join("log((", one, " + ", to_enclosed_expression(op0), ") / "
-		            "(", one, " - ", to_enclosed_expression(op0), ")) * 0.5",
-		            backend.float_literal_suffix ? "f" : "");
-		break;
-
-	default:
-		SPIRV_CROSS_THROW("Invalid op.");
-	}
-
-	emit_op(result_type, id, expr, forward);
-	inherit_expression_dependencies(id, op0);
-}
-
 void CompilerHLSL::convert_non_uniform_expression(string &expr, uint32_t ptr_id)
 {
 	if (*backend.nonuniform_qualifier == '\0')
@@ -18448,77 +18565,6 @@ std::pair<std::string, uint32_t> CompilerHLSL::flattened_access_chain_offset(
 	return std::make_pair(expr, offset);
 }
 
-void CompilerHLSL::emit_unrolled_unary_op(uint32_t result_type, uint32_t result_id, uint32_t operand, const char *op)
-{
-	auto &type = get<SPIRType>(result_type);
-	auto expr = type_to_glsl_constructor(type);
-	expr += '(';
-	for (uint32_t i = 0; i < type.vecsize; i++)
-	{
-		// Make sure to call to_expression multiple times to ensure
-		// that these expressions are properly flushed to temporaries if needed.
-		expr += op;
-		expr += to_extract_component_expression(operand, i);
-
-		if (i + 1 < type.vecsize)
-			expr += ", ";
-	}
-	expr += ')';
-	emit_op(result_type, result_id, expr, should_forward(operand));
-
-	inherit_expression_dependencies(result_id, operand);
-}
-
-void CompilerHLSL::emit_unrolled_binary_op(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1,
-                                           const char *op, bool negate, SPIRType::BaseType expected_type)
-{
-	auto &type0 = expression_type(op0);
-	auto &type1 = expression_type(op1);
-
-	SPIRType target_type0 = type0;
-	SPIRType target_type1 = type1;
-	target_type0.basetype = expected_type;
-	target_type1.basetype = expected_type;
-	target_type0.vecsize = 1;
-	target_type1.vecsize = 1;
-
-	auto &type = get<SPIRType>(result_type);
-	auto expr = type_to_glsl_constructor(type);
-	expr += '(';
-	for (uint32_t i = 0; i < type.vecsize; i++)
-	{
-		// Make sure to call to_expression multiple times to ensure
-		// that these expressions are properly flushed to temporaries if needed.
-		if (negate)
-			expr += "!(";
-
-		if (expected_type != SPIRType::Unknown && type0.basetype != expected_type)
-			expr += bitcast_expression(target_type0, type0.basetype, to_extract_component_expression(op0, i));
-		else
-			expr += to_extract_component_expression(op0, i);
-
-		expr += ' ';
-		expr += op;
-		expr += ' ';
-
-		if (expected_type != SPIRType::Unknown && type1.basetype != expected_type)
-			expr += bitcast_expression(target_type1, type1.basetype, to_extract_component_expression(op1, i));
-		else
-			expr += to_extract_component_expression(op1, i);
-
-		if (negate)
-			expr += ")";
-
-		if (i + 1 < type.vecsize)
-			expr += ", ";
-	}
-	expr += ')';
-	emit_op(result_type, result_id, expr, should_forward(op0) && should_forward(op1));
-
-	inherit_expression_dependencies(result_id, op0);
-	inherit_expression_dependencies(result_id, op1);
-}
-
 uint32_t CompilerHLSL::mask_relevant_memory_semantics(uint32_t semantics)
 {
 	return semantics & (MemorySemanticsAtomicCounterMemoryMask | MemorySemanticsImageMemoryMask |
@@ -18554,17 +18600,6 @@ void CompilerHLSL::emit_line_directive(uint32_t file_id, uint32_t line_literal)
 		statement_no_indent("#line ", line_literal, " \"", get<SPIRString>(file_id).str, "\"");
 	}
 }
-
-void CompilerHLSL::emit_while_loop_initializers(const SPIRBlock &block)
-{
-	// While loops do not take initializers, so declare all of them outside.
-	for (auto &loop_var : block.loop_variables)
-	{
-		auto &var = get<SPIRVariable>(loop_var);
-		statement(variable_decl(var), ";");
-	}
-}
-
 
 string CompilerHLSL::address_of_expression(const std::string &expr)
 {
@@ -19424,65 +19459,6 @@ void CompilerHLSL::request_workaround_wrapper_overload(TypeID id)
 		force_recompile();
 		workaround_ubo_load_overload_types.push_back(id);
 	}
-}
-
-void CompilerHLSL::emit_binary_func_op_cast(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1,
-                                            const char *op, SPIRType::BaseType input_type, bool skip_cast_if_equal_type)
-{
-	string cast_op0, cast_op1;
-	auto expected_type = binary_op_bitcast_helper(cast_op0, cast_op1, input_type, op0, op1, skip_cast_if_equal_type);
-	auto &out_type = get<SPIRType>(result_type);
-
-	// Special case boolean outputs since relational opcodes output booleans instead of int/uint.
-	string expr;
-	if (out_type.basetype != input_type && out_type.basetype != SPIRType::Boolean)
-	{
-		expected_type.basetype = input_type;
-		expr = bitcast_glsl_op(out_type, expected_type);
-		expr += '(';
-		expr += join(op, "(", cast_op0, ", ", cast_op1, ")");
-		expr += ')';
-	}
-	else
-	{
-		expr += join(op, "(", cast_op0, ", ", cast_op1, ")");
-	}
-
-	emit_op(result_type, result_id, expr, should_forward(op0) && should_forward(op1));
-	inherit_expression_dependencies(result_id, op0);
-	inherit_expression_dependencies(result_id, op1);
-}
-
-void CompilerHLSL::emit_trinary_func_op_cast(uint32_t result_type, uint32_t result_id, uint32_t op0, uint32_t op1,
-                                             uint32_t op2, const char *op, SPIRType::BaseType input_type)
-{
-	auto &out_type = get<SPIRType>(result_type);
-	auto expected_type = out_type;
-	expected_type.basetype = input_type;
-	string cast_op0 =
-	    expression_type(op0).basetype != input_type ? bitcast_glsl(expected_type, op0) : to_unpacked_expression(op0);
-	string cast_op1 =
-	    expression_type(op1).basetype != input_type ? bitcast_glsl(expected_type, op1) : to_unpacked_expression(op1);
-	string cast_op2 =
-	    expression_type(op2).basetype != input_type ? bitcast_glsl(expected_type, op2) : to_unpacked_expression(op2);
-
-	string expr;
-	if (out_type.basetype != input_type)
-	{
-		expr = bitcast_glsl_op(out_type, expected_type);
-		expr += '(';
-		expr += join(op, "(", cast_op0, ", ", cast_op1, ", ", cast_op2, ")");
-		expr += ')';
-	}
-	else
-	{
-		expr += join(op, "(", cast_op0, ", ", cast_op1, ", ", cast_op2, ")");
-	}
-
-	emit_op(result_type, result_id, expr, should_forward(op0) && should_forward(op1) && should_forward(op2));
-	inherit_expression_dependencies(result_id, op0);
-	inherit_expression_dependencies(result_id, op1);
-	inherit_expression_dependencies(result_id, op2);
 }
 
 void CompilerHLSL::emit_nminmax_op(uint32_t result_type, uint32_t id, uint32_t op0, uint32_t op1, GLSLstd450 op)
@@ -20485,18 +20461,6 @@ string CompilerHLSL::to_combined_image_sampler(VariableID , VariableID)
 	SPIRV_CROSS_THROW("Invalid call.");
 }
 
-string CompilerHLSL::to_extract_component_expression(uint32_t, uint32_t)
-{
-	SPIRV_CROSS_INVALID_CALL();
-	SPIRV_CROSS_THROW("Invalid call.");
-}
-
-void CompilerHLSL::emit_emulated_ahyper_op(uint32_t, uint32_t, uint32_t, GLSLstd450)
-{
-	SPIRV_CROSS_INVALID_CALL();
-	SPIRV_CROSS_THROW("Invalid call.");
-}
-
 void CompilerHLSL::convert_non_uniform_expression(string &, uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
@@ -20517,19 +20481,6 @@ std::pair<std::string, uint32_t> CompilerHLSL::flattened_access_chain_offset(
 	SPIRV_CROSS_THROW("Invalid call.");
 }
 
-void CompilerHLSL::emit_unrolled_unary_op(uint32_t, uint32_t, uint32_t, const char *)
-{
-	SPIRV_CROSS_INVALID_CALL();
-	SPIRV_CROSS_THROW("Invalid call.");
-}
-
-void CompilerHLSL::emit_unrolled_binary_op(uint32_t, uint32_t, uint32_t, uint32_t,
-                                           const char *, bool, SPIRType::BaseType)
-{
-	SPIRV_CROSS_INVALID_CALL();
-	SPIRV_CROSS_THROW("Invalid call.");
-}
-
 uint32_t CompilerHLSL::mask_relevant_memory_semantics(uint32_t)
 {
 	SPIRV_CROSS_INVALID_CALL();
@@ -20543,12 +20494,6 @@ const Instruction *CompilerHLSL::get_next_instruction_in_block(const Instruction
 }
 
 void CompilerHLSL::emit_line_directive(uint32_t, uint32_t)
-{
-	SPIRV_CROSS_INVALID_CALL();
-	SPIRV_CROSS_THROW("Invalid call.");
-}
-
-void CompilerHLSL::emit_while_loop_initializers(const SPIRBlock &)
 {
 	SPIRV_CROSS_INVALID_CALL();
 	SPIRV_CROSS_THROW("Invalid call.");
@@ -20756,20 +20701,6 @@ void CompilerHLSL::rewrite_load_for_wrapped_row_major(std::string &, TypeID, ID)
 }
 
 void CompilerHLSL::request_workaround_wrapper_overload(TypeID)
-{
-	SPIRV_CROSS_INVALID_CALL();
-	SPIRV_CROSS_THROW("Invalid call.");
-}
-
-void CompilerHLSL::emit_binary_func_op_cast(uint32_t, uint32_t, uint32_t, uint32_t,
-                                            const char *, SPIRType::BaseType, bool)
-{
-	SPIRV_CROSS_INVALID_CALL();
-	SPIRV_CROSS_THROW("Invalid call.");
-}
-
-void CompilerHLSL::emit_trinary_func_op_cast(uint32_t, uint32_t, uint32_t, uint32_t,
-                                             uint32_t, const char *, SPIRType::BaseType)
 {
 	SPIRV_CROSS_INVALID_CALL();
 	SPIRV_CROSS_THROW("Invalid call.");
