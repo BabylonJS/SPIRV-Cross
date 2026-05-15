@@ -4674,12 +4674,8 @@ void CompilerHLSL::emit_instruction(const Instruction &instruction)
 
 	case OpVectorTimesMatrix:
 	{
-#ifndef SPIRV_CROSS_WEBMIN
 		// Matrices are kept in a transposed state all the time, flip multiplication order always.
 		emit_binary_func_op(ops[0], ops[1], ops[3], ops[2], "mul");
-#else
-		SPIRV_CROSS_INVALID_CALL();
-#endif
 		break;
 	}
 
@@ -12583,7 +12579,6 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 
 	case OpVectorExtractDynamic:
 	{
-#ifndef SPIRV_CROSS_WEBMIN
 		uint32_t result_type = ops[0];
 		uint32_t id = ops[1];
 
@@ -12591,9 +12586,6 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		emit_op(result_type, id, expr, should_forward(ops[2]));
 		inherit_expression_dependencies(id, ops[2]);
 		inherit_expression_dependencies(id, ops[3]);
-#else
-		SPIRV_CROSS_INVALID_CALL();
-#endif
 		break;
 	}
 
@@ -13001,14 +12993,10 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		break;
 
 	case OpSNegate:
-#ifndef SPIRV_CROSS_WEBMIN
 		if (implicit_integer_promotion || expression_type_id(ops[2]) != ops[0])
 			GLSL_UOP_CAST(-);
 		else
 			GLSL_UOP(-);
-#else
-		SPIRV_CROSS_INVALID_CALL();
-#endif
 		break;
 
 	case OpFNegate:
@@ -13052,7 +13040,6 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 	case OpVectorTimesMatrix:
 	case OpMatrixTimesVector:
 	{
-#ifndef SPIRV_CROSS_WEBMIN
 		// If the matrix needs transpose, just flip the multiply order.
 		auto *e = maybe_get<SPIRExpression>(ops[opcode == OpMatrixTimesVector ? 2 : 3]);
 		if (e && e->need_transpose)
@@ -13075,9 +13062,6 @@ void CompilerHLSL::CompilerGLSL_emit_instruction(const Instruction &instruction)
 		}
 		else
 			GLSL_BOP(*);
-#else
-		SPIRV_CROSS_INVALID_CALL();
-#endif
 		break;
 	}
 
@@ -20744,11 +20728,42 @@ string CompilerHLSL::to_rerolled_array_expression(const SPIRType &,
 	SPIRV_CROSS_THROW("Invalid call.");
 }
 
-string CompilerHLSL::to_extract_constant_composite_expression(uint32_t, const SPIRConstant &,
-                                                              const uint32_t *, uint32_t)
+string CompilerHLSL::to_extract_constant_composite_expression(uint32_t result_type, const SPIRConstant &c,
+                                                              const uint32_t *chain, uint32_t length)
 {
-	SPIRV_CROSS_INVALID_CALL();
-	SPIRV_CROSS_THROW("Invalid call.");
+	// It is kinda silly if application actually enter this path since they know the constant up front.
+	// It is useful here to extract the plain constant directly.
+	SPIRConstant tmp;
+	tmp.constant_type = result_type;
+	auto &composite_type = get<SPIRType>(c.constant_type);
+	assert(composite_type.basetype != SPIRType::Struct && composite_type.array.empty());
+	assert(!c.specialization);
+
+	if (is_matrix(composite_type))
+	{
+		if (length == 2)
+		{
+			tmp.m.c[0].vecsize = 1;
+			tmp.m.columns = 1;
+			tmp.m.c[0].r[0] = c.m.c[chain[0]].r[chain[1]];
+		}
+		else
+		{
+			assert(length == 1);
+			tmp.m.c[0].vecsize = composite_type.vecsize;
+			tmp.m.columns = 1;
+			tmp.m.c[0] = c.m.c[chain[0]];
+		}
+	}
+	else
+	{
+		assert(length == 1);
+		tmp.m.c[0].vecsize = 1;
+		tmp.m.columns = 1;
+		tmp.m.c[0].r[0] = c.m.c[0].r[chain[0]];
+	}
+
+	return constant_expression(tmp);
 }
 
 void CompilerHLSL::emit_copy_logical_type(uint32_t, uint32_t, uint32_t, uint32_t,
