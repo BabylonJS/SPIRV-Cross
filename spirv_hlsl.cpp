@@ -20222,16 +20222,74 @@ CompilerHLSL::ShaderSubgroupSupportHelper::Result::Result()
 	SPIRV_CROSS_THROW("Invalid call.");
 }
 
-string CompilerHLSL::image_type_hlsl_legacy(const SPIRType &, uint32_t /*id*/)
+string CompilerHLSL::image_type_hlsl_legacy(const SPIRType &type, uint32_t /*id*/)
 {
-	SPIRV_CROSS_INVALID_CALL();
-	SPIRV_CROSS_THROW("Invalid call.");
+	auto &imagetype = get<SPIRType>(type.image.type);
+	string res;
+
+	switch (imagetype.basetype)
+	{
+	case SPIRType::Int:
+		res = "i";
+		break;
+	case SPIRType::UInt:
+		res = "u";
+		break;
+	default:
+		break;
+	}
+
+	if (type.basetype == SPIRType::Image && type.image.dim == DimSubpassData)
+		return res + "subpassInput" + (type.image.ms ? "MS" : "");
+
+	if (type.basetype == SPIRType::Image && type.image.dim != DimSubpassData)
+	{
+		if (type.image.dim == DimBuffer && type.image.sampled == 1)
+			res += "sampler";
+		else
+			res += type.image.sampled == 2 ? "image" : "texture";
+	}
+	else
+		res += "sampler";
+
+	switch (type.image.dim)
+	{
+	case Dim1D:
+		res += "1D";
+		break;
+	case Dim2D:
+		res += "2D";
+		break;
+	case Dim3D:
+		res += "3D";
+		break;
+	case DimCube:
+		res += "CUBE";
+		break;
+	case DimBuffer:
+		res += "Buffer";
+		break;
+	case DimSubpassData:
+		res += "2D";
+		break;
+	default:
+		SPIRV_CROSS_THROW("Only 1D, 2D, 3D, Buffer, InputTarget and Cube textures supported.");
+	}
+
+	if (type.image.ms)
+		res += "MS";
+	if (type.image.arrayed)
+		res += "Array";
+
+	return res;
 }
 
-string CompilerHLSL::image_type_hlsl(const SPIRType &, uint32_t)
+string CompilerHLSL::image_type_hlsl(const SPIRType &type, uint32_t id)
 {
-	SPIRV_CROSS_INVALID_CALL();
-	SPIRV_CROSS_THROW("Invalid call.");
+	if (hlsl_options.shader_model <= 30)
+		return image_type_hlsl_legacy(type, id);
+	else
+		return image_type_hlsl_modern(type, id);
 }
 
 std::string CompilerHLSL::to_initializer_expression(const SPIRVariable &)
