@@ -1361,6 +1361,30 @@ std::string CompilerHLSL::to_semantic(uint32_t location, ExecutionModel em, Stor
 	return join("TEXCOORD", location);
 }
 
+bool CompilerHLSL::should_flatten_varying_array(const SPIRType &type, StorageClass storage) const
+{
+	const auto model = get_entry_point().model;
+	const bool interstage = (model == ExecutionModelVertex && storage == StorageClassOutput) ||
+	                        (model == ExecutionModelFragment && storage == StorageClassInput);
+	return interstage && type.width == 32 && type.columns == 1 && type.vecsize < 4 && type.array.size() == 1;
+}
+
+void CompilerHLSL::emit_flattened_varying_array(const SPIRType &type, const string &name, const Bitset &flags,
+                                                uint32_t location, StorageClass storage,
+                                                unordered_set<uint32_t> &active_locations)
+{
+	const auto array_size = to_array_size_literal(type);
+	SPIRType element = type;
+	element.array.clear();
+	element.array_size_literal.clear();
+	for (uint32_t i = 0; i < array_size; i++)
+	{
+		statement(to_interpolation_qualifiers(flags), variable_decl(element, join(name, "_", i)), " : ",
+		          to_semantic(location + i, get_entry_point().model, storage), ";");
+		active_locations.insert(location + i);
+	}
+}
+
 void CompilerHLSL::emit_interface_block_in_struct(const SPIRVariable &var, unordered_set<uint32_t> &active_locations)
 {
 	auto &execution = get_entry_point();
@@ -1445,30 +1469,17 @@ void CompilerHLSL::emit_interface_block_in_struct(const SPIRVariable &var, unord
 			}
 
 			// fxc rejects indexable input register ranges whose per-register write masks differ.
-			// This happens for arrays of narrow (<4 component) inter-stage varyings: e.g.
+			// This happens for arrays of narrow (32-bit, <4 component) inter-stage varyings: e.g.
 			// `float vDepthMetric[4]` becomes an indexable TEXCOORD0..3 range whose scalar members
 			// get mismatched masks ("Masks on all input registers in an index range must be
 			// identical"). Flatten such arrays into one member per element with consecutive
 			// semantics -- mirroring how matrices are unrolled -- so no indexable range is emitted.
 			// The global keeps its array type; only the interface struct is flattened (matching
 			// element-wise copies are emitted in emit_hlsl_entry_point).
-			bool interstage_varying =
-			    (execution.model == ExecutionModelVertex && var.storage == StorageClassOutput) ||
-			    (execution.model == ExecutionModelFragment && var.storage == StorageClassInput);
-			if (interstage_varying && decl_type.columns <= 1 && decl_type.vecsize < 4 &&
-			    decl_type.array.size() == 1 && !decl_type.array.empty())
+			if (should_flatten_varying_array(decl_type, var.storage))
 			{
-				uint32_t array_size = to_array_size_literal(decl_type);
-				SPIRType elem_type = decl_type;
-				elem_type.array.clear();
-				elem_type.array_size_literal.clear();
-				for (uint32_t i = 0; i < array_size; i++)
-				{
-					statement(to_interpolation_qualifiers(get_decoration_bitset(var.self)),
-					          variable_decl(elem_type, join(name, "_", i)), " : ",
-					          to_semantic(location_number + i, execution.model, var.storage), ";");
-					active_locations.insert(location_number + i);
-				}
+				emit_flattened_varying_array(decl_type, name, get_decoration_bitset(var.self), location_number,
+				                            var.storage, active_locations);
 			}
 			else
 			{
@@ -3329,7 +3340,14 @@ void CompilerHLSL::emit_hlsl_entry_point()
 				{
 					auto mbr_name = to_member_name(type, mbr_idx);
 					auto flat_name = join(type_name, "_", mbr_name);
-					statement(var_name, ".", mbr_name, " = stage_input.", flat_name, ";");
+					auto &mbr_type = this->get<SPIRType>(type.member_types[mbr_idx]);
+					if (should_flatten_varying_array(mbr_type, var.storage))
+					{
+						for (uint32_t i = 0; i < to_array_size_literal(mbr_type); i++)
+							statement(var_name, ".", mbr_name, "[", i, "] = stage_input.", flat_name, "_", i, ";");
+					}
+					else
+						statement(var_name, ".", mbr_name, " = stage_input.", flat_name, ";");
 				}
 			}
 			else
@@ -3346,8 +3364,7 @@ void CompilerHLSL::emit_hlsl_entry_point()
 				{
 					// Match the interface-struct flattening of narrow inter-stage varying
 					// arrays (see emit_interface_block_in_struct): copy element by element.
-					if (execution.model == ExecutionModelFragment && mtype.columns <= 1 &&
-					    mtype.vecsize < 4 && mtype.array.size() == 1 && !mtype.array.empty())
+					if (should_flatten_varying_array(mtype, var.storage))
 					{
 						uint32_t array_size = to_array_size_literal(mtype);
 						for (uint32_t i = 0; i < array_size; i++)
@@ -3436,7 +3453,15 @@ void CompilerHLSL::emit_hlsl_entry_point()
 					{
 						auto mbr_name = to_member_name(type, mbr_idx);
 						auto flat_name = join(type_name, "_", mbr_name);
-						statement("stage_output.", flat_name, " = ", var_name, ".", mbr_name, ";");
+						auto &mbr_type = this->get<SPIRType>(type.member_types[mbr_idx]);
+						if (should_flatten_varying_array(mbr_type, var.storage))
+						{
+							for (uint32_t i = 0; i < to_array_size_literal(mbr_type); i++)
+								statement("stage_output.", flat_name, "_", i, " = ", var_name, ".", mbr_name,
+								          "[", i, "];");
+						}
+						else
+							statement("stage_output.", flat_name, " = ", var_name, ".", mbr_name, ";");
 					}
 				}
 				else
@@ -3455,8 +3480,7 @@ void CompilerHLSL::emit_hlsl_entry_point()
 					{
 						// Match the interface-struct flattening of narrow inter-stage varying
 						// arrays (see emit_interface_block_in_struct): copy element by element.
-						if (execution.model == ExecutionModelVertex && type.columns <= 1 &&
-						    type.vecsize < 4 && type.array.size() == 1 && !type.array.empty())
+						if (should_flatten_varying_array(type, var.storage))
 						{
 							uint32_t array_size = to_array_size_literal(type);
 							for (uint32_t i = 0; i < array_size; i++)
@@ -16648,6 +16672,13 @@ void CompilerHLSL::emit_interface_block_member_in_struct(const SPIRVariable &var
 	auto semantic = to_semantic(location, execution.model, var.storage);
 	auto mbr_name = join(to_name(type.self), "_", to_member_name(type, member_index));
 	auto &mbr_type = get<SPIRType>(type.member_types[member_index]);
+
+	if (should_flatten_varying_array(mbr_type, var.storage))
+	{
+		emit_flattened_varying_array(mbr_type, mbr_name, get_member_decoration_bitset(type.self, member_index),
+		                            location, var.storage, active_locations);
+		return;
+	}
 
 	statement(to_interpolation_qualifiers(get_member_decoration_bitset(type.self, member_index)),
 	          type_to_glsl(mbr_type),
