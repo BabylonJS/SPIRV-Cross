@@ -109,16 +109,38 @@ static void check_64_bit_shader(const char *path, bool vertex)
 		throw std::runtime_error("64-bit varying arrays must not be flattened.");
 }
 
+static void check_specialized_shader(const char *path, bool vertex, const std::string &output)
+{
+	CompilerHLSL compiler(read_spirv(path));
+	auto options = compiler.get_hlsl_options();
+	options.shader_model = 50;
+	compiler.set_hlsl_options(options);
+	const std::string source = compiler.compile();
+	std::ofstream file(output);
+	if (!(file << source))
+		throw std::runtime_error("Cannot write generated HLSL.");
+	require_text(source, "#ifndef SPIRV_CROSS_CONSTANT_ID_0");
+	require_text(source, "#define SPIRV_CROSS_CONSTANT_ID_0 2");
+	require_text(source, "static const int arraySize = SPIRV_CROSS_CONSTANT_ID_0;");
+	require_text(source, "float specialized[arraySize] : TEXCOORD0;");
+	require_text(source, "float2 SpecializedVaryings_pairs[arraySize] : TEXCOORD8;");
+	require_text(source, vertex ? "stage_output.specialized = specialized;" : "specialized = stage_input.specialized;");
+	require_text(source, vertex ? "stage_output.SpecializedVaryings_pairs = specData.pairs;" :
+	                              "specData.pairs = stage_input.SpecializedVaryings_pairs;");
+}
+
 int main(int argc, char **argv)
 {
 	try
 	{
-		if (argc != 6)
-			throw std::runtime_error("Expected vertex/fragment SPIR-V, an output directory, and 64-bit fixtures.");
+		if (argc != 8)
+			throw std::runtime_error("Expected vertex/fragment SPIR-V, an output directory, and 64-bit/spec fixtures.");
 		check_shader(argv[1], true, std::string(argv[3]) + "/hlsl_narrow_varying.vert.hlsl");
 		check_shader(argv[2], false, std::string(argv[3]) + "/hlsl_narrow_varying.frag.hlsl");
 		check_64_bit_shader(argv[4], true);
 		check_64_bit_shader(argv[5], false);
+		check_specialized_shader(argv[6], true, std::string(argv[3]) + "/hlsl_narrow_varying_spec.vert.hlsl");
+		check_specialized_shader(argv[7], false, std::string(argv[3]) + "/hlsl_narrow_varying_spec.frag.hlsl");
 	}
 	catch (const std::exception &error)
 	{

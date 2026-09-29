@@ -649,5 +649,7 @@ if(SPIRV_CROSS_ENABLE_TESTS AND SPIRV_CROSS_STATIC AND SPIRV_CROSS_ENABLE_HLSL)
 	         ${CMAKE_CURRENT_SOURCE_DIR}/tests-other/hlsl_narrow_varying.frag.spv
 	         ${CMAKE_CURRENT_BINARY_DIR}
 	         ${CMAKE_CURRENT_SOURCE_DIR}/tests-other/hlsl_narrow_varying_64.vert.spv
-	         ${CMAKE_CURRENT_SOURCE_DIR}/tests-other/hlsl_narrow_varying_64.frag.spv)
+	         ${CMAKE_CURRENT_SOURCE_DIR}/tests-other/hlsl_narrow_varying_64.frag.spv
+	         ${CMAKE_CURRENT_SOURCE_DIR}/tests-other/hlsl_narrow_varying_spec.vert.spv
+	         ${CMAKE_CURRENT_SOURCE_DIR}/tests-other/hlsl_narrow_varying_spec.frag.spv)
 endif()

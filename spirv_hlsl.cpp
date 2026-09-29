@@ -1366,7 +1366,8 @@ bool CompilerHLSL::should_flatten_varying_array(const SPIRType &type, StorageCla
 	const auto model = get_entry_point().model;
 	const bool interstage = (model == ExecutionModelVertex && storage == StorageClassOutput) ||
 	                        (model == ExecutionModelFragment && storage == StorageClassInput);
-	return interstage && type.width == 32 && type.columns == 1 && type.vecsize < 4 && type.array.size() == 1;
+	return interstage && type.width == 32 && type.columns == 1 && type.vecsize < 4 && type.array.size() == 1 &&
+	       type.array_size_literal[0];
 }
 
 void CompilerHLSL::emit_flattened_varying_array(const SPIRType &type, const string &name, const Bitset &flags,

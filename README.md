@@ -529,8 +529,10 @@ glslangValidator -V --target-env vulkan1.1 tests-other/hlsl_nested_loop.comp -o 
 The `spirv-cross-hlsl-narrow-varying-test` CTest target checks 32-bit scalar,
 `vec2`, and `vec3` inter-stage array declarations and element-wise copies for
 standalone variables and interface-block members, while preserving `vec4` and
-64-bit array interfaces. Flattening is limited to one-dimensional 32-bit arrays
-in vertex outputs and fragment inputs. It is also available with `SPIRV_CROSS_CLI=OFF` when
+64-bit and specialization-sized array interfaces. Flattening is limited to
+literal-sized one-dimensional 32-bit arrays in vertex outputs and fragment inputs;
+overridable specialization constants retain array interfaces and whole-array copies.
+It is also available with `SPIRV_CROSS_CLI=OFF` when
 static HLSL support and `SPIRV_CROSS_ENABLE_TESTS` are enabled. Its GLSL sources
 and precompiled SPIR-V fixtures live in `tests-other`. To regenerate the fixtures,
 use the glslang revision pinned in `checkout_glslang_spirv_tools.sh`:
@@ -540,6 +542,8 @@ glslangValidator -V --target-env vulkan1.1 tests-other/hlsl_narrow_varying.vert 
 glslangValidator -V --target-env vulkan1.1 tests-other/hlsl_narrow_varying.frag -o tests-other/hlsl_narrow_varying.frag.spv
 glslangValidator -V --target-env vulkan1.1 tests-other/hlsl_narrow_varying_64.vert -o tests-other/hlsl_narrow_varying_64.vert.spv
 glslangValidator -V --target-env vulkan1.1 tests-other/hlsl_narrow_varying_64.frag -o tests-other/hlsl_narrow_varying_64.frag.spv
+glslangValidator -V --target-env vulkan1.1 tests-other/hlsl_narrow_varying_spec.vert -o tests-other/hlsl_narrow_varying_spec.vert.spv
+glslangValidator -V --target-env vulkan1.1 tests-other/hlsl_narrow_varying_spec.frag -o tests-other/hlsl_narrow_varying_spec.frag.spv
 ```
 
 ### Licensing
