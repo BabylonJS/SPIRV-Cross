@@ -1443,13 +1443,43 @@ void CompilerHLSL::emit_interface_block_in_struct(const SPIRVariable &var, unord
 				decl_type.array.erase(decl_type.array.begin());
 				decl_type.array_size_literal.erase(decl_type.array_size_literal.begin());
 			}
-			statement(to_interpolation_qualifiers(get_decoration_bitset(var.self)), variable_decl(decl_type, name), " : ",
-			          semantic, ";");
 
-			// Structs and arrays should consume more locations.
-			uint32_t consumed_locations = type_to_consumed_locations(decl_type);
-			for (uint32_t i = 0; i < consumed_locations; i++)
-				active_locations.insert(location_number + i);
+			// fxc rejects indexable input register ranges whose per-register write masks differ.
+			// This happens for arrays of narrow (<4 component) inter-stage varyings: e.g.
+			// `float vDepthMetric[4]` becomes an indexable TEXCOORD0..3 range whose scalar members
+			// get mismatched masks ("Masks on all input registers in an index range must be
+			// identical"). Flatten such arrays into one member per element with consecutive
+			// semantics -- mirroring how matrices are unrolled -- so no indexable range is emitted.
+			// The global keeps its array type; only the interface struct is flattened (matching
+			// element-wise copies are emitted in emit_hlsl_entry_point).
+			bool interstage_varying =
+			    (execution.model == ExecutionModelVertex && var.storage == StorageClassOutput) ||
+			    (execution.model == ExecutionModelFragment && var.storage == StorageClassInput);
+			if (interstage_varying && decl_type.columns <= 1 && decl_type.vecsize < 4 &&
+			    decl_type.array.size() == 1 && !decl_type.array.empty())
+			{
+				uint32_t array_size = to_array_size_literal(decl_type);
+				SPIRType elem_type = decl_type;
+				elem_type.array.clear();
+				elem_type.array_size_literal.clear();
+				for (uint32_t i = 0; i < array_size; i++)
+				{
+					statement(to_interpolation_qualifiers(get_decoration_bitset(var.self)),
+					          variable_decl(elem_type, join(name, "_", i)), " : ",
+					          to_semantic(location_number + i, execution.model, var.storage), ";");
+					active_locations.insert(location_number + i);
+				}
+			}
+			else
+			{
+				statement(to_interpolation_qualifiers(get_decoration_bitset(var.self)), variable_decl(decl_type, name), " : ",
+				          semantic, ";");
+
+				// Structs and arrays should consume more locations.
+				uint32_t consumed_locations = type_to_consumed_locations(decl_type);
+				for (uint32_t i = 0; i < consumed_locations; i++)
+					active_locations.insert(location_number + i);
+			}
 		}
 	}
 	else
@@ -3314,7 +3344,19 @@ void CompilerHLSL::emit_hlsl_entry_point()
 				}
 				else
 				{
-					statement(name, " = stage_input.", name, ";");
+					// Match the interface-struct flattening of narrow inter-stage varying
+					// arrays (see emit_interface_block_in_struct): copy element by element.
+					if (execution.model == ExecutionModelFragment && mtype.columns <= 1 &&
+					    mtype.vecsize < 4 && mtype.array.size() == 1 && !mtype.array.empty())
+					{
+						uint32_t array_size = to_array_size_literal(mtype);
+						for (uint32_t i = 0; i < array_size; i++)
+							statement(name, "[", i, "] = stage_input.", name, "_", i, ";");
+					}
+					else
+					{
+						statement(name, " = stage_input.", name, ";");
+					}
 				}
 			}
 		}
@@ -3411,7 +3453,19 @@ void CompilerHLSL::emit_hlsl_entry_point()
 					}
 					else
 					{
-						statement("stage_output.", name, " = ", name, ";");
+						// Match the interface-struct flattening of narrow inter-stage varying
+						// arrays (see emit_interface_block_in_struct): copy element by element.
+						if (execution.model == ExecutionModelVertex && type.columns <= 1 &&
+						    type.vecsize < 4 && type.array.size() == 1 && !type.array.empty())
+						{
+							uint32_t array_size = to_array_size_literal(type);
+							for (uint32_t i = 0; i < array_size; i++)
+								statement("stage_output.", name, "_", i, " = ", name, "[", i, "];");
+						}
+						else
+						{
+							statement("stage_output.", name, " = ", name, ";");
+						}
 					}
 				}
 			}
