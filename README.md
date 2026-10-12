@@ -510,6 +510,22 @@ A pull request which does not pass testing on Travis will not be accepted howeve
 When adding support for new features to SPIRV-Cross, a new shader and reference file should be added which covers usage of the new shader features in question.
 Travis CI runs the test suite with the CMake, by running `ctest`. This is a more straight-forward alternative to `./test_shaders.sh`.
 
+For FXC consumers, `CompilerHLSL::Options::enable_fxc_nested_loop_workaround`
+adds `[fastopt]` to rolled loops containing another loop. This avoids FXC
+arithmetic miscompilation during nested-loop simulation. It is disabled by
+default and is not intended for DXC; explicit unroll hints are preserved.
+
+The `spirv-cross-hlsl-nested-loop-test` CTest target checks the opt-in behavior,
+while/do-while coverage (including explicitly unrolled do-while loops), explicit
+unroll hints, and unchanged output apart from
+the added hints. It is also available with `SPIRV_CROSS_CLI=OFF` when static HLSL
+support and `SPIRV_CROSS_ENABLE_TESTS` are enabled. Regenerate its SPIR-V fixture
+using the glslang revision pinned in `checkout_glslang_spirv_tools.sh`:
+
+```sh
+glslangValidator -V --target-env vulkan1.1 tests-other/hlsl_nested_loop.comp -o tests-other/hlsl_nested_loop.spv
+```
+
 ### Licensing
 
 Contributors of new files should add a copyright header at the top of every new source code file with their copyright
@@ -551,4 +567,3 @@ Otherwise, `./test_shaders.py` will fail with error code.
 
 To obtain a CSV of static shader cycle counts before and after going through spirv-cross, add
 `--malisc` flag to `./test_shaders`. This requires the Mali Offline Compiler to be installed in PATH.
-

@@ -179,6 +179,10 @@ public:
 		// This relies on UserTypeGOOGLE to encode the buffer type either as "structuredbuffer" or "rwstructuredbuffer"
 		// whereas the type can be extended with an optional subtype, e.g. "structuredbuffer:int".
 		bool preserve_structured_buffers = false;
+
+		// Emit [fastopt] on rolled loops containing other loops to avoid FXC dropping
+		// arithmetic on saturated values during loop simulation. Leave disabled for DXC.
+		bool enable_fxc_nested_loop_workaround = false;
 	};
 
 	struct OptionsGLSL
@@ -427,6 +431,7 @@ private:
 	void emit_store(const Instruction &instruction);
 	void emit_atomic(const uint32_t *ops, uint32_t length, spv::Op op);
 	void emit_subgroup_op(const Instruction &i);
+	void emit_fxc_nested_loop_hint(const SPIRBlock &block);
 	void emit_block_hints(const SPIRBlock &block);
 
 	void emit_struct_member(const SPIRType &type, uint32_t member_type_id, uint32_t index, const std::string &qualifier = "",
