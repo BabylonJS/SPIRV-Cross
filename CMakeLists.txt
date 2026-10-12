@@ -639,4 +639,17 @@ if(SPIRV_CROSS_ENABLE_TESTS AND SPIRV_CROSS_STATIC AND SPIRV_CROSS_ENABLE_HLSL)
 	         COMMAND spirv-cross-hlsl-nested-loop-test
 	         ${CMAKE_CURRENT_SOURCE_DIR}/tests-other/hlsl_nested_loop.spv
 	         ${CMAKE_CURRENT_BINARY_DIR})
+
+	add_executable(spirv-cross-hlsl-narrow-varying-test tests-other/hlsl_narrow_varying.cpp)
+	target_link_libraries(spirv-cross-hlsl-narrow-varying-test PRIVATE spirv-cross-hlsl)
+	set_target_properties(spirv-cross-hlsl-narrow-varying-test PROPERTIES LINK_FLAGS "${spirv-cross-link-flags}")
+	add_test(NAME spirv-cross-hlsl-narrow-varying-test
+	         COMMAND spirv-cross-hlsl-narrow-varying-test
+	         ${CMAKE_CURRENT_SOURCE_DIR}/tests-other/hlsl_narrow_varying.vert.spv
+	         ${CMAKE_CURRENT_SOURCE_DIR}/tests-other/hlsl_narrow_varying.frag.spv
+	         ${CMAKE_CURRENT_BINARY_DIR}
+	         ${CMAKE_CURRENT_SOURCE_DIR}/tests-other/hlsl_narrow_varying_64.vert.spv
+	         ${CMAKE_CURRENT_SOURCE_DIR}/tests-other/hlsl_narrow_varying_64.frag.spv
+	         ${CMAKE_CURRENT_SOURCE_DIR}/tests-other/hlsl_narrow_varying_spec.vert.spv
+	         ${CMAKE_CURRENT_SOURCE_DIR}/tests-other/hlsl_narrow_varying_spec.frag.spv)
 endif()
