@@ -62,7 +62,7 @@ static void check_shader(const char *path, bool vertex, const std::string &outpu
 		             std::string("static ") + types[group] + " " + name + "[" + std::to_string(counts[group]) + "]");
 		for (unsigned i = 0; i < counts[group]; i++, location++)
 		{
-			const std::string member = name + "_" + std::to_string(i);
+			const std::string member = name + "__" + std::to_string(i);
 			const std::string element = name + "[" + std::to_string(i) + "]";
 			require_text(source,
 			             std::string(types[group]) + " " + member + " : TEXCOORD" + std::to_string(location) + ";");
@@ -77,7 +77,7 @@ static void check_shader(const char *path, bool vertex, const std::string &outpu
 		const std::string name = names[group];
 		for (unsigned i = 0; i < counts[group]; i++, location++)
 		{
-			const std::string member = "Varyings_" + name + "_" + std::to_string(i);
+			const std::string member = "Varyings_" + name + "__" + std::to_string(i);
 			const std::string element = "blockData." + name + "[" + std::to_string(i) + "]";
 			require_text(source,
 			             std::string(types[group]) + " " + member + " : TEXCOORD" + std::to_string(location) + ";");
@@ -86,6 +86,8 @@ static void check_shader(const char *path, bool vertex, const std::string &outpu
 		}
 	}
 	require_text(source, "float4 Varyings_wide[2] : TEXCOORD20;");
+	require_text(source, "float2 pairs_0 : TEXCOORD23;");
+	require_text(source, vertex ? "stage_output.pairs_0 = pairs_0;" : "pairs_0 = stage_input.pairs_0;");
 	require_text(source, vertex ? "stage_output.wide = wide;" : "wide = stage_input.wide;");
 	require_text(source, vertex ? "stage_output.Varyings_wide = blockData.wide;" :
 	                              "blockData.wide = stage_input.Varyings_wide;");

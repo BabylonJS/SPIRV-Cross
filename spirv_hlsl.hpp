@@ -389,6 +389,7 @@ private:
 	void emit_interface_block_globally(const SPIRVariable &type);
 	void emit_interface_block_in_struct(const SPIRVariable &var, std::unordered_set<uint32_t> &active_locations);
 	bool should_flatten_varying_array(const SPIRType &type, spv::StorageClass storage) const;
+	static std::string flattened_varying_element_name(const std::string &name, uint32_t index);
 	void emit_flattened_varying_array(const SPIRType &type, const std::string &name, const Bitset &flags,
 	                                  uint32_t location, spv::StorageClass storage,
 	                                  std::unordered_set<uint32_t> &active_locations);
