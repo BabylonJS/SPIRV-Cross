@@ -1370,6 +1370,13 @@ bool CompilerHLSL::should_flatten_varying_array(const SPIRType &type, StorageCla
 	       type.array_size_literal[0];
 }
 
+// Source identifiers never contain "__" (see ParsedIR::sanitize_underscores), so this separator
+// cannot collide with a user varying such as `name_0`.
+string CompilerHLSL::flattened_varying_element_name(const string &name, uint32_t index)
+{
+	return join(name, "__", index);
+}
+
 void CompilerHLSL::emit_flattened_varying_array(const SPIRType &type, const string &name, const Bitset &flags,
                                                 uint32_t location, StorageClass storage,
                                                 unordered_set<uint32_t> &active_locations)
@@ -1380,7 +1387,7 @@ void CompilerHLSL::emit_flattened_varying_array(const SPIRType &type, const stri
 	element.array_size_literal.clear();
 	for (uint32_t i = 0; i < array_size; i++)
 	{
-		statement(to_interpolation_qualifiers(flags), variable_decl(element, join(name, "_", i)), " : ",
+		statement(to_interpolation_qualifiers(flags), variable_decl(element, flattened_varying_element_name(name, i)), " : ",
 		          to_semantic(location + i, get_entry_point().model, storage), ";");
 		active_locations.insert(location + i);
 	}
@@ -3345,7 +3352,7 @@ void CompilerHLSL::emit_hlsl_entry_point()
 					if (should_flatten_varying_array(mbr_type, var.storage))
 					{
 						for (uint32_t i = 0; i < to_array_size_literal(mbr_type); i++)
-							statement(var_name, ".", mbr_name, "[", i, "] = stage_input.", flat_name, "_", i, ";");
+							statement(var_name, ".", mbr_name, "[", i, "] = stage_input.", flattened_varying_element_name(flat_name, i), ";");
 					}
 					else
 						statement(var_name, ".", mbr_name, " = stage_input.", flat_name, ";");
@@ -3369,7 +3376,7 @@ void CompilerHLSL::emit_hlsl_entry_point()
 					{
 						uint32_t array_size = to_array_size_literal(mtype);
 						for (uint32_t i = 0; i < array_size; i++)
-							statement(name, "[", i, "] = stage_input.", name, "_", i, ";");
+							statement(name, "[", i, "] = stage_input.", flattened_varying_element_name(name, i), ";");
 					}
 					else
 					{
@@ -3458,7 +3465,7 @@ void CompilerHLSL::emit_hlsl_entry_point()
 						if (should_flatten_varying_array(mbr_type, var.storage))
 						{
 							for (uint32_t i = 0; i < to_array_size_literal(mbr_type); i++)
-								statement("stage_output.", flat_name, "_", i, " = ", var_name, ".", mbr_name,
+								statement("stage_output.", flattened_varying_element_name(flat_name, i), " = ", var_name, ".", mbr_name,
 								          "[", i, "];");
 						}
 						else
@@ -3485,7 +3492,7 @@ void CompilerHLSL::emit_hlsl_entry_point()
 						{
 							uint32_t array_size = to_array_size_literal(type);
 							for (uint32_t i = 0; i < array_size; i++)
-								statement("stage_output.", name, "_", i, " = ", name, "[", i, "];");
+								statement("stage_output.", flattened_varying_element_name(name, i), " = ", name, "[", i, "];");
 						}
 						else
 						{

@@ -532,6 +532,8 @@ standalone variables and interface-block members, while preserving `vec4` and
 64-bit and specialization-sized array interfaces. Flattening is limited to
 literal-sized one-dimensional 32-bit arrays in vertex outputs and fragment inputs;
 overridable specialization constants retain array interfaces and whole-array copies.
+Flattened elements are named `name__i`; source identifiers never contain `__`, so they
+cannot collide with user varyings such as `name_0`.
 It is also available with `SPIRV_CROSS_CLI=OFF` when
 static HLSL support and `SPIRV_CROSS_ENABLE_TESTS` are enabled. Its GLSL sources
 and precompiled SPIR-V fixtures live in `tests-other`. To regenerate the fixtures,

@@ -25,6 +25,7 @@ layout(location = 11) in Varyings
     vec3 triples[2];
     vec4 wide[2];
 } blockData;
+layout(location = 23) in vec2 pairs_0;
 layout(set = 0, binding = 0) uniform Parameters
 {
     int index;
@@ -38,4 +39,5 @@ void main()
     color += vec4(blockData.scalars[index & 3]) +
              vec4(blockData.pairs[0] + blockData.pairs[1] + blockData.pairs[2], 0.0, 0.0) +
              vec4(blockData.triples[0] + blockData.triples[1], 0.0) + blockData.wide[index & 1];
+    color.xy += pairs_0;
 }

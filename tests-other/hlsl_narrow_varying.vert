@@ -25,6 +25,8 @@ layout(location = 11) out Varyings
     vec3 triples[2];
     vec4 wide[2];
 } blockData;
+// Shares the old flattened element name of pairs[0].
+layout(location = 23) out vec2 pairs_0;
 
 void main()
 {
@@ -43,4 +45,5 @@ void main()
     blockData.pairs = pairs;
     blockData.triples = triples;
     blockData.wide = wide;
+    pairs_0 = -pairs[0];
 }
